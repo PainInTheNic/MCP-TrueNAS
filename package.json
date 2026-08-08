@@ -1,11 +1,11 @@
 {
-  "name": "truenas-mcp-server",
+  "name": "mcp-truenas",
   "version": "0.1.0",
   "description": "MCP server for monitoring and managing a TrueNAS SCALE/CORE box from Claude",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "truenas-mcp-server": "dist/index.js"
+    "mcp-truenas": "dist/index.js"
   },
   "files": [
     "dist",
@@ -30,16 +30,16 @@
     "claude",
     "claude-code"
   ],
-  "author": "Nic Pierce <nic@nicpierce.com>",
+  "author": "PainInTheNic",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PainInTheNic/truenas-mcp-server.git"
+    "url": "git+https://github.com/PainInTheNic/MCP-TrueNAS.git"
   },
   "bugs": {
-    "url": "https://github.com/PainInTheNic/truenas-mcp-server/issues"
+    "url": "https://github.com/PainInTheNic/MCP-TrueNAS/issues"
   },
-  "homepage": "https://github.com/PainInTheNic/truenas-mcp-server#readme",
+  "homepage": "https://github.com/PainInTheNic/MCP-TrueNAS#readme",
   "engines": {
     "node": ">=22"
   },

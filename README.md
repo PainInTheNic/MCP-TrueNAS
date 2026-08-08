@@ -1,4 +1,4 @@
-# truenas-mcp-server
+# MCP-TrueNAS
 
 An MCP (Model Context Protocol) server that lets Claude monitor and manage a
 TrueNAS box in plain English: *"any alerts on the NAS?"*, *"how full is tank?"*,
@@ -215,4 +215,4 @@ the session; Claude picks up the new tool automatically.
 
 ## License
 
-[MIT](LICENSE) © Nic Pierce
+[MIT](LICENSE) © PainInTheNic

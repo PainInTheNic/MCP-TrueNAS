@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * truenas-mcp-server — lets Claude (or any MCP client) manage a TrueNAS box.
+ * MCP-TrueNAS — lets Claude (or any MCP client) manage a TrueNAS box.
  *
  * How it fits together:
  *   Claude Code ── stdio (JSON-RPC) ──> this process ── HTTPS/WSS ──> TrueNAS
@@ -49,7 +49,7 @@ function getClient(): TrueNasClient {
 }
 
 const server = new McpServer({
-  name: "truenas-mcp-server",
+  name: "mcp-truenas",
   version: "0.1.0",
 });
 
@@ -58,7 +58,7 @@ registerTools(server, { config, getClient });
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("truenas-mcp-server running on stdio");
+  console.error("mcp-truenas running on stdio");
 
   // Clean shutdown: close the MCP transport and the upstream TrueNAS WebSocket
   // instead of leaking the authenticated connection on exit.
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error(`truenas-mcp-server received ${signal}, shutting down`);
+    console.error(`mcp-truenas received ${signal}, shutting down`);
     try {
       client?.close();
     } catch {
