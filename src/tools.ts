@@ -670,4 +670,36 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }
     }
   );
+
+  // ---------------- updates ----------------
+  server.registerTool(
+    "truenas_check_updates",
+    {
+      title: "Check for System Updates",
+      description:
+        "Check if TrueNAS system updates are available. Shows current version, available versions, and update status.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().updateCheck()) as Record<string, unknown>;
+        const structured = {
+          current_version: raw.current_version ?? null,
+          available: raw.available ?? false,
+          latest_version: raw.latest_version ?? null,
+          changelog_url: raw.changelog_url ?? null,
+          full_info: raw,
+        };
+        return respond(structured, response_format, () => {
+          if (!structured.available) {
+            return `# System is up to date\n\nCurrent version: ${structured.current_version ?? "—"}`;
+          }
+          return `# Update available!\n\n- **Current**: ${structured.current_version ?? "—"}\n- **Latest**: ${structured.latest_version ?? "—"}${structured.changelog_url ? `\n- **Changelog**: ${structured.changelog_url}` : ""}`;
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
 }

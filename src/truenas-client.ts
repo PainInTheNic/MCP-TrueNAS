@@ -541,6 +541,14 @@ export class TrueNasClient {
     if (opts.dataset) params.dataset = opts.dataset;
     return (await this.restGet("/zfs/snapshot", params)) as unknown[];
   }
+
+  async updateCheck(): Promise<Record<string, unknown>> {
+    const det = await this.detect();
+    if (det.mode === "websocket") {
+      return (await this.call("update.check_available")) as Record<string, unknown>;
+    }
+    return (await this.restGet("/update/check_available")) as Record<string, unknown>;
+  }
 }
 
 // ------------------------------------------------------------------
