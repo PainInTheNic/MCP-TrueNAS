@@ -51,19 +51,34 @@ objects, and the login-method change coming in TrueNAS 27
 
 ## The tools
 
-All read-only (`readOnlyHint: true`), all paginate or filter where data can
-be large. Each accepts `response_format`: `markdown` (default, compact
-summary) or `json` (full structured data).
+All read-only (`readOnlyHint: true`), all paginate or filter where data can be
+large. Each accepts `response_format`: `markdown` (default, compact summary) or
+`json` (full structured data). Every tool also declares an `outputSchema`, so
+the structured result is machine-validated by the MCP client.
 
+**System & storage**
 - `truenas_connection_status` — diagnose config/reachability/auth; start here when something fails
 - `truenas_get_system_info` — version, hostname, uptime, CPU, RAM, load
+- `truenas_check_updates` — whether a base-OS update is available, plus reboot-required state
 - `truenas_list_pools` — pool health, capacity, usage %, fragmentation, scrub activity
 - `truenas_list_datasets` — space used/available, quotas, compression (filter by pool, paginated)
-- `truenas_list_alerts` — active alerts, filterable by severity
 - `truenas_list_disks` — model, serial, size, pool membership, optional temperatures
+- `truenas_list_snapshots` — snapshots with creation time and space (filter by dataset, paginated)
+
+**Health & activity**
+- `truenas_list_alerts` — active alerts, filterable by severity
 - `truenas_list_services` — SMB/NFS/SSH/… state and boot setting
 - `truenas_list_jobs` — background jobs: scrubs, replications, failures
-- `truenas_list_snapshots` — snapshots with creation time and space (filter by dataset, paginated)
+
+**Apps, sharing, backups & VMs** — require TrueNAS 25.04+ (WebSocket API)
+- `truenas_list_apps` — installed apps and whether an app/image **update is available**, plus Docker status
+- `truenas_list_shares` — SMB shares, NFS exports, and iSCSI targets in one call
+- `truenas_list_network` — IP addresses, default routes, DNS, and per-interface link state
+- `truenas_list_replication_tasks` — configured ZFS replication (backup) tasks and last-run state
+- `truenas_list_cloudsync_tasks` — cloud backup tasks (S3/Drive/B2/…); credentials never shown
+- `truenas_list_snapshot_tasks` — periodic (automatic) snapshot policy and retention
+- `truenas_list_scrub_tasks` — scheduled pool scrub tasks
+- `truenas_list_vms` — virtual machines, run state, and resource allocation
 
 ## Setup
 
@@ -102,14 +117,16 @@ npm run build
 
 ### 4. Register with Claude Code
 
-Already done for this folder: [.mcp.json](.mcp.json) is project-scoped
-registration — Claude Code will ask once to approve it, then launch the
-server automatically in every session opened in this project.
+This repo ships a project-scoped [.mcp.json](.mcp.json) that launches the
+server via a **relative** path (`dist/index.js`). Once you've built it, Claude
+Code asks to approve the server the first time you open a session in this
+folder, then launches it automatically thereafter.
 
-To use it from *any* folder, register it user-wide instead:
+To use it from *any* folder, register it user-wide with the absolute path to
+your clone:
 
 ```bash
-claude mcp add --scope user --transport stdio truenas -- node C:\Users\Nic\Documents\Claude\Code\MCP-TrueNAS\dist\index.js
+claude mcp add --scope user --transport stdio truenas -- node /absolute/path/to/MCP-TrueNAS/dist/index.js
 ```
 
 Check it connected with `claude mcp list` (or `/mcp` inside a session).
@@ -151,7 +168,7 @@ server.registerTool(
     inputSchema: z.object({                 // zod validates before your code runs
       pool: z.string().optional().describe("shown to the model too"),
     }),
-    annotations: { readOnlyHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ pool }) => {
     try {
@@ -191,3 +208,11 @@ the session; Claude picks up the new tool automatically.
   revokes keys observed on unencrypted transport.
 - TLS verification is on unless you explicitly disable it for a self-signed
   cert.
+- Some TrueNAS read APIs return secrets (cloud-sync OAuth tokens, a VM's VNC
+  password). The tools that touch those — `truenas_list_cloudsync_tasks` and
+  `truenas_list_vms` — deliberately project only non-sensitive fields, so no
+  tokens, secrets, or passwords are ever surfaced to the model.
+
+## License
+
+[MIT](LICENSE) © Nic Pierce

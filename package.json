@@ -1,15 +1,45 @@
 {
   "name": "truenas-mcp-server",
   "version": "0.1.0",
-  "description": "MCP server for managing TrueNAS infrastructure from Claude",
+  "description": "MCP server for monitoring and managing a TrueNAS SCALE/CORE box from Claude",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "truenas-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "prepare": "npm run build"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "truenas",
+    "truenas-scale",
+    "zfs",
+    "nas",
+    "claude",
+    "claude-code"
+  ],
+  "author": "Nic Pierce <nic@nicpierce.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PainInTheNic/truenas-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PainInTheNic/truenas-mcp-server/issues"
+  },
+  "homepage": "https://github.com/PainInTheNic/truenas-mcp-server#readme",
   "engines": {
     "node": ">=22"
   },
