@@ -29,7 +29,9 @@ interface ToolContext {
 /** Claude Code soft-caps MCP tool output around 25k tokens; stay well under it. */
 const CHARACTER_LIMIT = 25_000;
 
-const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+// Closed domain: these tools query one known, owner-controlled NAS, not an
+// open world of external entities — so openWorldHint is false.
+const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 
 const responseFormat = z
   .enum(["markdown", "json"])
@@ -40,13 +42,17 @@ type TextBlock = { type: "text"; text: string };
 type ToolResult = { content: TextBlock[]; structuredContent?: Record<string, unknown>; isError?: boolean };
 
 /**
- * Build a tool result. A wrinkle discovered in review: some MCP clients
- * (Claude Code among them) show the model JSON.stringify(structuredContent)
- * INSTEAD of the text block whenever structuredContent is present — so
- * returning both would bypass our markdown summaries AND our size guard.
- * Therefore: markdown format returns text only (the summary IS the payload);
- * json format returns the data as text plus structuredContent, dropping
- * structuredContent when it would blow the client's ~25k-token result cap.
+ * Build a tool result.
+ *
+ * Contract (updated after the MCP spec audit): every tool declares an
+ * outputSchema, and the MCP SDK then REQUIRES structuredContent on a successful
+ * result — a text-only result fails output validation. So we ALWAYS attach
+ * structuredContent (the schema-validated machine channel). The text block is a
+ * human-facing rendering only: a compact markdown summary by default, or
+ * pretty-printed JSON when response_format=json. Because structuredContent
+ * carries the authoritative, complete data, an oversized text preview can be
+ * safely shortened — in json mode we swap in a small valid-JSON notice rather
+ * than slicing serialized JSON into something unparseable.
  */
 function respond(
   structured: Record<string, unknown>,
@@ -58,30 +64,27 @@ function respond(
     const capped =
       text.length > CHARACTER_LIMIT
         ? text.slice(0, CHARACTER_LIMIT) +
-          "\n\n[Truncated — use limit/offset parameters or filters to narrow the result.]"
+          "\n\n[Preview truncated — the full result is in structuredContent; narrow with limit/offset or filters.]"
         : text;
-    return { content: [{ type: "text", text: capped }] };
+    return { content: [{ type: "text", text: capped }], structuredContent: structured };
   }
   const json = JSON.stringify(structured, null, 2);
-  if (json.length > CHARACTER_LIMIT) {
-    // Never slice serialized JSON — that produces unparseable output exactly
-    // when structure matters most. Emit a well-formed JSON envelope instead,
-    // and omit structuredContent so the client isn't handed the oversized blob.
-    const notice = JSON.stringify(
-      {
-        truncated: true,
-        note:
-          "Result exceeded the size limit. Narrow it with limit/offset or filters, " +
-          "or request response_format=markdown for a compact summary.",
-        character_limit: CHARACTER_LIMIT,
-        approx_size: json.length,
-      },
-      null,
-      2
-    );
-    return { content: [{ type: "text", text: notice }] };
-  }
-  return { content: [{ type: "text", text: json }], structuredContent: structured };
+  const text =
+    json.length > CHARACTER_LIMIT
+      ? JSON.stringify(
+          {
+            truncated: true,
+            note:
+              "Text preview omitted for size; the full result is in structuredContent. " +
+              "Narrow with limit/offset or filters for a smaller preview.",
+            character_limit: CHARACTER_LIMIT,
+            approx_size: json.length,
+          },
+          null,
+          2
+        )
+      : json;
+  return { content: [{ type: "text", text }], structuredContent: structured };
 }
 
 function errorResult(error: unknown): ToolResult {
@@ -105,6 +108,16 @@ function mdTable(headers: string[], rows: (string | number | boolean | null | un
   const line = (cells: (string | number | boolean | null | undefined)[]) =>
     "| " + cells.map((c) => (c === null || c === undefined || c === "" ? "—" : String(c))).join(" | ") + " |";
   return [line(headers), "|" + headers.map(() => "---").join("|") + "|", ...rows.map(line)].join("\n");
+}
+
+/** Format a TrueNAS cron schedule object as a "m h dom month dow" string. */
+function cronStr(
+  s: { minute?: string; hour?: string; dom?: string; month?: string; dow?: string } | undefined | null
+): string | null {
+  if (!s) return null;
+  const parts = [s.minute, s.hour, s.dom, s.month, s.dow];
+  if (parts.every((p) => p == null)) return null;
+  return parts.map((p) => (p == null ? "*" : p)).join(" ");
 }
 
 /** ZFS properties arrive wrapped: {parsed: 123, value: "123K", ...}. Unwrap both views. */
@@ -230,6 +243,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         "(never the key itself), which API generation was detected (WebSocket JSON-RPC vs legacy REST), " +
         "and whether authentication succeeded. Call this first when any other truenas_ tool fails.",
       inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        truenas_url: z.string(),
+        api_key_present: z.boolean(),
+        tls_verification: z.string(),
+        api_mode: z.string().optional(),
+        api_versions: z.array(z.string()).optional(),
+        reachable: z.boolean().optional(),
+        authenticated: z.boolean().optional(),
+        truenas_version: z.string().nullable().optional(),
+        hostname: z.string().nullable().optional(),
+        uptime: z.string().nullable().optional(),
+        probe_error: z.string().optional(),
+        hint: z.string().optional(),
+      }),
       annotations: READ_ONLY,
     },
     async ({ response_format }): Promise<ToolResult> => {
@@ -292,6 +319,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         "Get system information from TrueNAS: product version, hostname, uptime, CPU model and core count, " +
         "physical memory, load averages, boot time, and timezone.",
       inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        version: z.string().nullable(),
+        hostname: z.string().nullable(),
+        uptime: z.string().nullable(),
+        cpu_model: z.string().nullable(),
+        cores: z.number().nullable(),
+        physical_cores: z.number().nullable(),
+        memory: z.string(),
+        memory_bytes: z.number().nullable(),
+        loadavg: z.array(z.number()).nullable(),
+        boottime: z.string().nullable(),
+        timezone: z.string().nullable(),
+        ecc_memory: z.boolean().nullable(),
+      }),
       annotations: READ_ONLY,
     },
     async ({ response_format }): Promise<ToolResult> => {
@@ -339,6 +380,29 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         "allocated, free, usage %), fragmentation, and any running scrub/resilver. The first stop for " +
         "'how are my pools?' or 'how full is my NAS?'.",
       inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        pools: z.array(
+          z.object({
+            name: z.string().nullable(),
+            status: z.string().nullable(),
+            healthy: z.boolean().nullable(),
+            warning: z.boolean().nullable(),
+            status_detail: z.string().nullable(),
+            size: z.string(),
+            allocated: z.string(),
+            free: z.string(),
+            size_bytes: z.number().nullable(),
+            allocated_bytes: z.number().nullable(),
+            free_bytes: z.number().nullable(),
+            usage_percent: z.number().nullable(),
+            fragmentation_percent: z.string().nullable(),
+            scan: z
+              .object({ function: z.string().nullable(), percent: z.number().nullable() })
+              .nullable(),
+          })
+        ),
+      }),
       annotations: READ_ONLY,
     },
     async ({ response_format }): Promise<ToolResult> => {
@@ -403,12 +467,41 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         offset: z.number().int().min(0).default(0).describe("Datasets to skip, for pagination"),
         response_format: responseFormat,
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        offset: z.number(),
+        has_more: z.boolean(),
+        next_offset: z.number().nullable(),
+        datasets: z.array(
+          z.object({
+            name: z.string().nullable(),
+            pool: z.string().nullable(),
+            type: z.string().nullable(),
+            mountpoint: z.string().nullable(),
+            encrypted: z.boolean(),
+            locked: z.boolean(),
+            used: z.string().nullable(),
+            used_bytes: z.number().nullable(),
+            available: z.string().nullable(),
+            available_bytes: z.number().nullable(),
+            used_by_snapshots: z.string().nullable(),
+            quota: z.string().nullable(),
+            compression: z.string().nullable(),
+            compression_ratio: z.string().nullable(),
+            readonly: z.string().nullable(),
+          })
+        ),
+      }),
       annotations: READ_ONLY,
     },
     async ({ pool, limit, offset, response_format }): Promise<ToolResult> => {
       try {
-        const raw = (await getClient().datasets({ pool, limit, offset })) as RawDataset[];
-        const datasets = raw.map((d) => ({
+        // Fetch one extra row so has_more is accurate (a page that exactly
+        // fills `limit` would otherwise falsely advertise another page).
+        const raw = (await getClient().datasets({ pool, limit: limit + 1, offset })) as RawDataset[];
+        const has_more = raw.length > limit;
+        const page = has_more ? raw.slice(0, limit) : raw;
+        const datasets = page.map((d) => ({
           name: d.id ?? null,
           pool: d.pool ?? null,
           type: d.type ?? null,
@@ -428,8 +521,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const structured = {
           count: datasets.length,
           offset,
-          has_more: datasets.length === limit,
-          next_offset: datasets.length === limit ? offset + limit : null,
+          has_more,
+          next_offset: has_more ? offset + limit : null,
           datasets,
         };
         return respond(structured, response_format, () =>
@@ -467,14 +560,32 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .describe("Only alerts at or above this severity (INFO < NOTICE < WARNING < ERROR < CRITICAL < ALERT < EMERGENCY)"),
         response_format: responseFormat,
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        alerts: z.array(
+          z.object({
+            level: z.string().nullable(),
+            text: z.string().nullable(),
+            source: z.string().nullable(),
+            first_seen: z.string().nullable(),
+            last_occurrence: z.string().nullable(),
+            dismissed: z.boolean(),
+            uuid: z.string().nullable(),
+          })
+        ),
+      }),
       annotations: READ_ONLY,
     },
     async ({ include_dismissed, min_level, response_format }): Promise<ToolResult> => {
       try {
         const raw = (await getClient().alerts()) as RawAlert[];
         const minIndex = min_level ? ALERT_LEVELS.indexOf(min_level) : 0;
-        const levelIndex = (level: string | undefined): number =>
-          ALERT_LEVELS.indexOf((level ?? "INFO") as AlertLevel);
+        // An unrecognized/renamed severity must not vanish from the report:
+        // clamp unknown levels to the INFO floor (0) instead of -1.
+        const levelIndex = (level: string | undefined): number => {
+          const i = ALERT_LEVELS.indexOf((level ?? "INFO") as AlertLevel);
+          return i === -1 ? 0 : i;
+        };
         const alerts = raw
           .filter((a) => include_dismissed || !a.dismissed)
           .filter((a) => levelIndex(a.level) >= minIndex)
@@ -516,6 +627,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: z.object({
         include_temperatures: z.boolean().default(false).describe("Also fetch current disk temperatures"),
         response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        disks: z.array(
+          z.object({
+            name: z.string().nullable(),
+            device: z.string().nullable(),
+            model: z.string().nullable(),
+            serial: z.string().nullable(),
+            size: z.string(),
+            size_bytes: z.number().nullable(),
+            type: z.string().nullable(),
+            rotation_rpm: z.number().nullable(),
+            pool: z.string().nullable(),
+            bus: z.string().nullable(),
+            temperature_c: z.number().nullable().optional(),
+          })
+        ),
+        temperature_error: z.string().optional(),
       }),
       annotations: READ_ONLY,
     },
@@ -580,6 +710,16 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         state: z.enum(["RUNNING", "STOPPED"]).optional().describe("Only services in this state"),
         response_format: responseFormat,
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        services: z.array(
+          z.object({
+            service: z.string().nullable(),
+            state: z.string().nullable(),
+            start_on_boot: z.boolean().nullable(),
+          })
+        ),
+      }),
       annotations: READ_ONLY,
     },
     async ({ state, response_format }): Promise<ToolResult> => {
@@ -619,6 +759,22 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         state: z.enum(["WAITING", "RUNNING", "SUCCESS", "FAILED", "ABORTED"]).optional().describe("Only jobs in this state"),
         limit: z.number().int().min(1).max(200).default(20).describe("Maximum jobs to return"),
         response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        jobs: z.array(
+          z.object({
+            id: z.number().nullable(),
+            method: z.string().nullable(),
+            description: z.string().nullable(),
+            state: z.string().nullable(),
+            progress_percent: z.number().nullable(),
+            progress_description: z.string().nullable(),
+            error: z.string().nullable(),
+            started: z.string().nullable(),
+            finished: z.string().nullable(),
+          })
+        ),
       }),
       annotations: READ_ONLY,
     },
@@ -673,12 +829,31 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         offset: z.number().int().min(0).default(0).describe("Snapshots to skip, for pagination"),
         response_format: responseFormat,
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        offset: z.number(),
+        has_more: z.boolean(),
+        next_offset: z.number().nullable(),
+        snapshots: z.array(
+          z.object({
+            id: z.string().nullable(),
+            dataset: z.string().nullable(),
+            name: z.string().nullable(),
+            created: z.string().nullable(),
+            used: z.string().nullable(),
+            referenced: z.string().nullable(),
+          })
+        ),
+      }),
       annotations: READ_ONLY,
     },
     async ({ dataset, limit, offset, response_format }): Promise<ToolResult> => {
       try {
-        const raw = (await getClient().snapshots({ dataset, limit, offset })) as RawSnapshot[];
-        const snapshots = raw.map((s) => {
+        // Fetch one extra row so has_more is accurate (see datasets tool).
+        const raw = (await getClient().snapshots({ dataset, limit: limit + 1, offset })) as RawSnapshot[];
+        const has_more = raw.length > limit;
+        const page = has_more ? raw.slice(0, limit) : raw;
+        const snapshots = page.map((s) => {
           const id = s.id ?? "";
           const atIndex = id.indexOf("@");
           return {
@@ -693,8 +868,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const structured = {
           count: snapshots.length,
           offset,
-          has_more: snapshots.length === limit,
-          next_offset: snapshots.length === limit ? offset + limit : null,
+          has_more,
+          next_offset: has_more ? offset + limit : null,
           snapshots,
         };
         return respond(structured, response_format, () =>
@@ -721,6 +896,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         "a reboot. Reports the current version and, if an update exists, the candidate version and release " +
         "notes. Note: this covers the TrueNAS OS only — it does NOT check for app/catalog updates.",
       inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        update_available: z.boolean(),
+        current_version: z.string().nullable(),
+        train: z.string().nullable(),
+        new_version: z.string().nullable(),
+        release_notes_url: z.string().nullable(),
+        reboot_required: z.boolean().nullable(),
+        reboot_reasons: z.array(z.string()),
+      }),
       annotations: READ_ONLY,
     },
     async ({ response_format }): Promise<ToolResult> => {
@@ -752,6 +936,759 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             rebootLine
           );
         });
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- apps ----------------
+  server.registerTool(
+    "truenas_list_apps",
+    {
+      title: "List Apps & Available Updates",
+      description:
+        "List installed TrueNAS apps (the Docker-based Apps catalog, 24.10+) with their running state, " +
+        "current version, and — the key part — whether an app or catalog update is available " +
+        "(upgrade_available / image_updates_available). Also reports the Docker backend's status. This is " +
+        "the app-level counterpart to truenas_check_updates, which only covers the base OS.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        upgrades_available: z.number(),
+        docker_status: z.string().nullable(),
+        apps: z.array(
+          z.object({
+            name: z.string().nullable(),
+            title: z.string().nullable(),
+            state: z.string().nullable(),
+            version: z.string().nullable(),
+            latest_version: z.string().nullable(),
+            upgrade_available: z.boolean(),
+            image_updates_available: z.boolean(),
+            custom_app: z.boolean(),
+            train: z.string().nullable(),
+            portals: z.record(z.string(), z.string()),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const raw = (await client.apps()) as Array<{
+          name?: string;
+          id?: string;
+          state?: string;
+          version?: string;
+          human_version?: string;
+          latest_version?: string;
+          upgrade_available?: boolean;
+          image_updates_available?: boolean;
+          custom_app?: boolean;
+          metadata?: { title?: string; train?: string };
+          portals?: Record<string, string>;
+        }>;
+        let dockerStatus: string | null = null;
+        try {
+          const d = (await client.dockerStatus()) as { status?: string };
+          dockerStatus = d?.status ?? null;
+        } catch {
+          // Docker status is context, not essential; ignore if unavailable.
+        }
+        const apps = raw.map((a) => ({
+          name: a.name ?? a.id ?? null,
+          title: a.metadata?.title ?? null,
+          state: a.state ?? null,
+          version: a.human_version ?? a.version ?? null,
+          latest_version: a.latest_version ?? null,
+          upgrade_available: a.upgrade_available ?? false,
+          image_updates_available: a.image_updates_available ?? false,
+          custom_app: a.custom_app ?? false,
+          train: a.metadata?.train ?? null,
+          portals: a.portals ?? {},
+        }));
+        const upgrades = apps.filter((a) => a.upgrade_available || a.image_updates_available).length;
+        const structured = {
+          count: apps.length,
+          upgrades_available: upgrades,
+          docker_status: dockerStatus,
+          apps,
+        };
+        return respond(structured, response_format, () => {
+          const header =
+            `**${upgrades}** of **${apps.length}** app(s) have updates available` +
+            (dockerStatus ? ` · Docker: ${dockerStatus}` : "") +
+            ".\n\n";
+          if (apps.length === 0) return header + "No apps installed.";
+          return (
+            header +
+            mdTable(
+              ["App", "State", "Version", "Latest", "Update"],
+              apps.map((a) => [
+                a.name,
+                a.state,
+                a.version,
+                a.latest_version,
+                a.upgrade_available ? "yes" : a.image_updates_available ? "image only" : "no",
+              ])
+            )
+          );
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- replication tasks ----------------
+  server.registerTool(
+    "truenas_list_replication_tasks",
+    {
+      title: "List Replication Tasks",
+      description:
+        "List configured ZFS replication tasks (backup jobs that send snapshots to another dataset or a " +
+        "remote box) with direction, transport, whether they're enabled, and last-run state. Unlike " +
+        "truenas_list_jobs, this shows the task CONFIGURATION even when nothing is running.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            direction: z.string().nullable(),
+            transport: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            auto: z.boolean().nullable(),
+            source_datasets: z.array(z.string()),
+            target_dataset: z.string().nullable(),
+            state: z.string().nullable(),
+            last_run: z.string().nullable(),
+            last_error: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().replicationTasks()) as Array<{
+          id?: number;
+          name?: string;
+          direction?: string;
+          transport?: string;
+          enabled?: boolean;
+          auto?: boolean;
+          source_datasets?: string[];
+          target_dataset?: string;
+          state?: { state?: string; last_error?: string | null; datetime?: string };
+        }>;
+        const tasks = raw.map((t) => ({
+          id: t.id ?? null,
+          name: t.name ?? null,
+          direction: t.direction ?? null,
+          transport: t.transport ?? null,
+          enabled: t.enabled ?? null,
+          auto: t.auto ?? null,
+          source_datasets: t.source_datasets ?? [],
+          target_dataset: t.target_dataset ?? null,
+          state: t.state?.state ?? null,
+          last_run: t.state?.datetime ?? null,
+          last_error: t.state?.last_error ?? null,
+        }));
+        const structured = { count: tasks.length, tasks };
+        return respond(structured, response_format, () =>
+          tasks.length === 0
+            ? "No replication tasks configured."
+            : mdTable(
+                ["Name", "Direction", "Transport", "Enabled", "Target", "Last state"],
+                tasks.map((t) => [
+                  t.name,
+                  t.direction,
+                  t.transport,
+                  t.enabled === null ? null : t.enabled ? "yes" : "no",
+                  t.target_dataset,
+                  t.state,
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- cloud sync tasks ----------------
+  server.registerTool(
+    "truenas_list_cloudsync_tasks",
+    {
+      title: "List Cloud Sync Tasks",
+      description:
+        "List configured cloud sync tasks (backups to/from S3, Google Drive, Backblaze, etc.) with local " +
+        "path, direction, provider, schedule, and last-run state. Credentials, tokens, and secrets are " +
+        "deliberately never included.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            id: z.number().nullable(),
+            description: z.string().nullable(),
+            path: z.string().nullable(),
+            direction: z.string().nullable(),
+            transfer_mode: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            provider: z.string().nullable(),
+            credential_name: z.string().nullable(),
+            schedule: z.string().nullable(),
+            include_rules: z.number(),
+            last_run_state: z.string().nullable(),
+            last_run_finished: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        // NOTE: cloudsync.query returns full provider credentials (client_secret,
+        // OAuth access/refresh tokens). We read ONLY non-sensitive fields — never
+        // credentials.provider secrets or the token blob.
+        const raw = (await getClient().cloudsyncTasks()) as Array<{
+          id?: number;
+          description?: string;
+          path?: string;
+          direction?: string;
+          transfer_mode?: string;
+          enabled?: boolean;
+          include?: string[];
+          credentials?: { name?: string; provider?: { type?: string } };
+          schedule?: { minute?: string; hour?: string; dom?: string; month?: string; dow?: string };
+          job?: { state?: string; time_finished?: string } | null;
+        }>;
+        const tasks = raw.map((t) => ({
+          id: t.id ?? null,
+          description: t.description ?? null,
+          path: t.path ?? null,
+          direction: t.direction ?? null,
+          transfer_mode: t.transfer_mode ?? null,
+          enabled: t.enabled ?? null,
+          provider: t.credentials?.provider?.type ?? null,
+          credential_name: t.credentials?.name ?? null,
+          schedule: cronStr(t.schedule),
+          include_rules: Array.isArray(t.include) ? t.include.length : 0,
+          last_run_state: t.job?.state ?? null,
+          last_run_finished: t.job?.time_finished ?? null,
+        }));
+        const structured = { count: tasks.length, tasks };
+        return respond(structured, response_format, () =>
+          tasks.length === 0
+            ? "No cloud sync tasks configured."
+            : mdTable(
+                ["Description", "Provider", "Direction", "Path", "Enabled", "Last state"],
+                tasks.map((t) => [
+                  t.description,
+                  t.provider,
+                  t.direction,
+                  t.path,
+                  t.enabled === null ? null : t.enabled ? "yes" : "no",
+                  t.last_run_state,
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- shares (SMB / NFS / iSCSI) ----------------
+  server.registerTool(
+    "truenas_list_shares",
+    {
+      title: "List Shares (SMB / NFS / iSCSI)",
+      description:
+        "List all configured file and block shares in one call: SMB shares, NFS exports, and iSCSI targets, " +
+        "each with their name/path and enabled state. Answers 'what is this NAS actually serving?'.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        smb: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            path: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            purpose: z.string().nullable(),
+            comment: z.string().nullable(),
+            readonly: z.boolean().nullable(),
+            browsable: z.boolean().nullable(),
+            locked: z.boolean().nullable(),
+          })
+        ),
+        nfs: z.array(
+          z.object({
+            id: z.number().nullable(),
+            path: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            comment: z.string().nullable(),
+            networks: z.array(z.string()),
+            hosts: z.array(z.string()),
+            readonly: z.boolean().nullable(),
+          })
+        ),
+        iscsi: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            alias: z.string().nullable(),
+            mode: z.string().nullable(),
+          })
+        ),
+        errors: z.record(z.string(), z.string()).optional(),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      const client = getClient();
+      const errors: Record<string, string> = {};
+      const grab = async <T>(label: string, fn: () => Promise<T[]>): Promise<T[]> => {
+        try {
+          return await fn();
+        } catch (error) {
+          errors[label] = error instanceof Error ? error.message : String(error);
+          return [];
+        }
+      };
+      const [smbRaw, nfsRaw, iscsiRaw] = await Promise.all([
+        grab("smb", () =>
+          client.smbShares() as Promise<
+            Array<{
+              id?: number;
+              name?: string;
+              path?: string;
+              enabled?: boolean;
+              purpose?: string;
+              comment?: string;
+              readonly?: boolean;
+              browsable?: boolean;
+              locked?: boolean;
+            }>
+          >
+        ),
+        grab("nfs", () =>
+          client.nfsShares() as Promise<
+            Array<{
+              id?: number;
+              path?: string;
+              paths?: string[];
+              enabled?: boolean;
+              comment?: string;
+              networks?: string[];
+              hosts?: string[];
+              ro?: boolean;
+            }>
+          >
+        ),
+        grab("iscsi", () =>
+          client.iscsiTargets() as Promise<
+            Array<{ id?: number; name?: string; alias?: string | null; mode?: string }>
+          >
+        ),
+      ]);
+      const smb = smbRaw.map((s) => ({
+        id: s.id ?? null,
+        name: s.name ?? null,
+        path: s.path ?? null,
+        enabled: s.enabled ?? null,
+        purpose: s.purpose ?? null,
+        comment: s.comment ?? null,
+        readonly: s.readonly ?? null,
+        browsable: s.browsable ?? null,
+        locked: s.locked ?? null,
+      }));
+      const nfs = nfsRaw.map((s) => ({
+        id: s.id ?? null,
+        path: s.path ?? (Array.isArray(s.paths) ? s.paths.join(", ") : null),
+        enabled: s.enabled ?? null,
+        comment: s.comment ?? null,
+        networks: s.networks ?? [],
+        hosts: s.hosts ?? [],
+        readonly: s.ro ?? null,
+      }));
+      const iscsi = iscsiRaw.map((t) => ({
+        id: t.id ?? null,
+        name: t.name ?? null,
+        alias: t.alias ?? null,
+        mode: t.mode ?? null,
+      }));
+      const structured = {
+        smb,
+        nfs,
+        iscsi,
+        ...(Object.keys(errors).length ? { errors } : {}),
+      };
+      return respond(structured, response_format, () => {
+        const lines = [
+          `**SMB**: ${smb.length} · **NFS**: ${nfs.length} · **iSCSI targets**: ${iscsi.length}`,
+          "",
+        ];
+        if (smb.length)
+          lines.push(
+            "### SMB",
+            mdTable(
+              ["Name", "Path", "Enabled", "Read-only"],
+              smb.map((s) => [
+                s.name,
+                s.path,
+                s.enabled === null ? null : s.enabled ? "yes" : "no",
+                s.readonly === null ? null : s.readonly ? "yes" : "no",
+              ])
+            ),
+            ""
+          );
+        if (nfs.length)
+          lines.push(
+            "### NFS",
+            mdTable(
+              ["Path", "Enabled", "Networks"],
+              nfs.map((s) => [s.path, s.enabled === null ? null : s.enabled ? "yes" : "no", s.networks.join(", ")])
+            ),
+            ""
+          );
+        if (iscsi.length)
+          lines.push(
+            "### iSCSI",
+            mdTable(
+              ["Name", "Alias", "Mode"],
+              iscsi.map((t) => [t.name, t.alias, t.mode])
+            ),
+            ""
+          );
+        if (Object.keys(errors).length)
+          lines.push(`_Some share types could not be read: ${JSON.stringify(errors)}_`);
+        return lines.join("\n");
+      });
+    }
+  );
+
+  // ---------------- network ----------------
+  server.registerTool(
+    "truenas_list_network",
+    {
+      title: "Network Status",
+      description:
+        "Compact network health view: a summary of IP addresses per interface, default routes, and DNS " +
+        "nameservers, plus per-interface type, link state, MAC, addresses, and MTU. The first stop for " +
+        "'is the NAS's networking okay?' or diagnosing a down NIC.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        summary: z.object({
+          default_routes: z.array(z.string()),
+          nameservers: z.array(z.string()),
+          ips: z.record(z.string(), z.unknown()),
+        }),
+        interfaces: z.array(
+          z.object({
+            name: z.string().nullable(),
+            type: z.string().nullable(),
+            link_state: z.string().nullable(),
+            mac: z.string().nullable(),
+            addresses: z.array(z.string()),
+            dhcp: z.boolean().nullable(),
+            mtu: z.number().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const summaryRaw = (await client.networkSummary()) as {
+          ips?: Record<string, unknown>;
+          default_routes?: string[];
+          nameservers?: string[];
+        };
+        const raw = (await client.interfaces()) as Array<{
+          id?: string;
+          name?: string;
+          type?: string;
+          mtu?: number | null;
+          ipv4_dhcp?: boolean;
+          aliases?: Array<{ type?: string; address?: string; netmask?: number }>;
+          state?: {
+            link_state?: string;
+            link_address?: string;
+            aliases?: Array<{ type?: string; address?: string; netmask?: number }>;
+          };
+        }>;
+        const interfaces = raw.map((i) => {
+          const aliases = (i.aliases && i.aliases.length ? i.aliases : i.state?.aliases) ?? [];
+          const addresses = aliases
+            .filter((a) => a.type === "INET" || a.type === "INET6")
+            .map((a) => `${a.address}${a.netmask != null ? "/" + a.netmask : ""}`);
+          return {
+            name: i.name ?? i.id ?? null,
+            type: i.type ?? null,
+            link_state: i.state?.link_state ?? null,
+            mac: i.state?.link_address ?? null,
+            addresses,
+            dhcp: i.ipv4_dhcp ?? null,
+            mtu: i.mtu ?? null,
+          };
+        });
+        const structured = {
+          summary: {
+            default_routes: summaryRaw.default_routes ?? [],
+            nameservers: summaryRaw.nameservers ?? [],
+            ips: summaryRaw.ips ?? {},
+          },
+          interfaces,
+        };
+        return respond(structured, response_format, () =>
+          [
+            `**Default routes**: ${structured.summary.default_routes.join(", ") || "—"}`,
+            `**Nameservers**: ${structured.summary.nameservers.join(", ") || "—"}`,
+            "",
+            mdTable(
+              ["Interface", "Type", "Link", "Addresses", "MTU"],
+              interfaces.map((i) => [i.name, i.type, i.link_state, i.addresses.join(", "), i.mtu])
+            ),
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- snapshot tasks ----------------
+  server.registerTool(
+    "truenas_list_snapshot_tasks",
+    {
+      title: "List Periodic Snapshot Tasks",
+      description:
+        "List configured periodic (automatic) snapshot tasks with their dataset, retention policy, schedule, " +
+        "and whether they're enabled. truenas_list_snapshots shows the snapshots that EXIST; this shows " +
+        "whether an automatic snapshot POLICY is actually running.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            id: z.number().nullable(),
+            dataset: z.string().nullable(),
+            recursive: z.boolean().nullable(),
+            enabled: z.boolean().nullable(),
+            retention: z.string().nullable(),
+            naming_schema: z.string().nullable(),
+            schedule: z.string().nullable(),
+            last_state: z.string().nullable(),
+            last_snapshot: z.string().nullable(),
+            last_run: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().snapshotTasks()) as Array<{
+          id?: number;
+          dataset?: string;
+          recursive?: boolean;
+          enabled?: boolean;
+          lifetime_value?: number;
+          lifetime_unit?: string;
+          naming_schema?: string;
+          schedule?: { minute?: string; hour?: string; dom?: string; month?: string; dow?: string };
+          state?: { state?: string; datetime?: string; last_snapshot?: string };
+        }>;
+        const tasks = raw.map((t) => ({
+          id: t.id ?? null,
+          dataset: t.dataset ?? null,
+          recursive: t.recursive ?? null,
+          enabled: t.enabled ?? null,
+          retention:
+            t.lifetime_value != null ? `${t.lifetime_value} ${t.lifetime_unit ?? ""}`.trim() : null,
+          naming_schema: t.naming_schema ?? null,
+          schedule: cronStr(t.schedule),
+          last_state: t.state?.state ?? null,
+          last_snapshot: t.state?.last_snapshot ?? null,
+          last_run: t.state?.datetime ?? null,
+        }));
+        const structured = { count: tasks.length, tasks };
+        return respond(structured, response_format, () =>
+          tasks.length === 0
+            ? "No periodic snapshot tasks configured."
+            : mdTable(
+                ["Dataset", "Recursive", "Retention", "Schedule", "Enabled", "Last snapshot"],
+                tasks.map((t) => [
+                  t.dataset,
+                  t.recursive === null ? null : t.recursive ? "yes" : "no",
+                  t.retention,
+                  t.schedule,
+                  t.enabled === null ? null : t.enabled ? "yes" : "no",
+                  t.last_snapshot,
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- scrub tasks ----------------
+  server.registerTool(
+    "truenas_list_scrub_tasks",
+    {
+      title: "List Scheduled Scrub Tasks",
+      description:
+        "List scheduled pool scrub tasks with their pool, schedule, threshold (minimum days between scrubs), " +
+        "and enabled state. Complements truenas_list_pools, which shows a scrub only while it's running.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            id: z.number().nullable(),
+            pool: z.string().nullable(),
+            threshold_days: z.number().nullable(),
+            enabled: z.boolean().nullable(),
+            schedule: z.string().nullable(),
+            description: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().scrubTasks()) as Array<{
+          id?: number;
+          pool_name?: string;
+          threshold?: number;
+          description?: string;
+          enabled?: boolean;
+          schedule?: { minute?: string; hour?: string; dom?: string; month?: string; dow?: string };
+        }>;
+        const tasks = raw.map((t) => ({
+          id: t.id ?? null,
+          pool: t.pool_name ?? null,
+          threshold_days: t.threshold ?? null,
+          enabled: t.enabled ?? null,
+          schedule: cronStr(t.schedule),
+          description: t.description ?? null,
+        }));
+        const structured = { count: tasks.length, tasks };
+        return respond(structured, response_format, () =>
+          tasks.length === 0
+            ? "No scheduled scrub tasks configured."
+            : mdTable(
+                ["Pool", "Schedule", "Threshold (days)", "Enabled"],
+                tasks.map((t) => [
+                  t.pool,
+                  t.schedule,
+                  t.threshold_days,
+                  t.enabled === null ? null : t.enabled ? "yes" : "no",
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- virtual machines ----------------
+  server.registerTool(
+    "truenas_list_vms",
+    {
+      title: "List Virtual Machines",
+      description:
+        "List virtual machines with their run state, autostart, vCPU/memory allocation, bootloader, and a " +
+        "device summary (disk/NIC counts, whether a display is attached). Device details, including any VNC " +
+        "display password, are deliberately omitted.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        vms: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            description: z.string().nullable(),
+            state: z.string().nullable(),
+            autostart: z.boolean().nullable(),
+            vcpus: z.number().nullable(),
+            cores: z.number().nullable(),
+            threads: z.number().nullable(),
+            memory_mib: z.number().nullable(),
+            bootloader: z.string().nullable(),
+            disks: z.number(),
+            nics: z.number(),
+            has_display: z.boolean(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        // NOTE: vm.query returns device attributes including a VNC DISPLAY
+        // password in cleartext. We summarize devices by type only and never
+        // surface their attributes.
+        const raw = (await getClient().vms()) as Array<{
+          id?: number;
+          name?: string;
+          description?: string;
+          vcpus?: number;
+          cores?: number;
+          threads?: number;
+          memory?: number;
+          autostart?: boolean;
+          bootloader?: string;
+          status?: { state?: string };
+          devices?: Array<{ attributes?: { dtype?: string } }>;
+        }>;
+        const vms = raw.map((v) => {
+          const devs = v.devices ?? [];
+          const countType = (t: string) => devs.filter((d) => d.attributes?.dtype === t).length;
+          return {
+            id: v.id ?? null,
+            name: v.name ?? null,
+            description: v.description ?? null,
+            state: v.status?.state ?? null,
+            autostart: v.autostart ?? null,
+            vcpus: v.vcpus ?? null,
+            cores: v.cores ?? null,
+            threads: v.threads ?? null,
+            memory_mib: v.memory ?? null,
+            bootloader: v.bootloader ?? null,
+            disks: countType("DISK"),
+            nics: countType("NIC"),
+            has_display: countType("DISPLAY") > 0,
+          };
+        });
+        const structured = { count: vms.length, vms };
+        return respond(structured, response_format, () =>
+          vms.length === 0
+            ? "No virtual machines configured."
+            : mdTable(
+                ["Name", "State", "Autostart", "vCPUs", "Memory (MiB)", "Disks", "NICs"],
+                vms.map((v) => [
+                  v.name,
+                  v.state,
+                  v.autostart === null ? null : v.autostart ? "yes" : "no",
+                  v.vcpus,
+                  v.memory_mib,
+                  v.disks,
+                  v.nics,
+                ])
+              )
+        );
       } catch (error) {
         return errorResult(error);
       }
