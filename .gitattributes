@@ -1,0 +1,6 @@
+# Normalize line endings to LF in the repo so Windows/macOS/Linux
+# contributors don't produce noisy CRLF/LF diffs.
+* text=auto eol=lf
+
+# Binary/lockfile: keep as-is, don't try to normalize.
+package-lock.json -text
