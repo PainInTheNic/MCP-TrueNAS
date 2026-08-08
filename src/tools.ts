@@ -677,25 +677,40 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Check for System Updates",
       description:
-        "Check if TrueNAS system updates are available. Shows current version, available versions, and update status.",
+        "Check whether a TrueNAS base-OS (system) update is available, and whether the system is waiting on " +
+        "a reboot. Reports the current version and, if an update exists, the candidate version and release " +
+        "notes. Note: this covers the TrueNAS OS only — it does NOT check for app/catalog updates.",
       inputSchema: z.object({ response_format: responseFormat }),
       annotations: READ_ONLY,
     },
     async ({ response_format }): Promise<ToolResult> => {
       try {
-        const raw = (await getClient().updateCheck()) as Record<string, unknown>;
+        const u = await getClient().updateCheck();
         const structured = {
-          current_version: raw.current_version ?? null,
-          available: raw.available ?? false,
-          latest_version: raw.latest_version ?? null,
-          changelog_url: raw.changelog_url ?? null,
-          full_info: raw,
+          update_available: u.available,
+          current_version: u.current_version,
+          train: u.train,
+          new_version: u.new_version,
+          release_notes_url: u.release_notes_url,
+          reboot_required: u.reboot_required,
+          reboot_reasons: u.reboot_reasons,
         };
         return respond(structured, response_format, () => {
-          if (!structured.available) {
-            return `# System is up to date\n\nCurrent version: ${structured.current_version ?? "—"}`;
+          const trainSuffix = u.train ? ` (train ${u.train})` : "";
+          const rebootLine =
+            u.reboot_required === true
+              ? `\n\n⚠ **Reboot required**${u.reboot_reasons.length ? `: ${u.reboot_reasons.join("; ")}` : ""}`
+              : "";
+          if (!u.available) {
+            return `# System is up to date\n\n- **Current version**: ${u.current_version ?? "—"}${trainSuffix}${rebootLine}`;
           }
-          return `# Update available!\n\n- **Current**: ${structured.current_version ?? "—"}\n- **Latest**: ${structured.latest_version ?? "—"}${structured.changelog_url ? `\n- **Changelog**: ${structured.changelog_url}` : ""}`;
+          return (
+            "# Update available\n\n" +
+            `- **Current version**: ${u.current_version ?? "—"}${trainSuffix}\n` +
+            `- **New version**: ${u.new_version ?? "—"}` +
+            (u.release_notes_url ? `\n- **Release notes**: ${u.release_notes_url}` : "") +
+            rebootLine
+          );
         });
       } catch (error) {
         return errorResult(error);

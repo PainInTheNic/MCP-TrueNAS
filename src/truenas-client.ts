@@ -542,21 +542,99 @@ export class TrueNasClient {
     return (await this.restGet("/zfs/snapshot", params)) as unknown[];
   }
 
-  async updateCheck(): Promise<Record<string, unknown>> {
+  /**
+   * Check whether a base-OS update is available.
+   *
+   * TrueNAS 25.04+ (WebSocket): update.status takes no params and returns
+   *   { code, status: { current_version, new_version | null }, error }
+   * where new_version === null means "up to date". (The older
+   * update.check_available / update.get_pending were REMOVED — they 404 now,
+   * which is why the earlier system.info hack silently always said "up to date".)
+   * We additionally query system.reboot.info so the tool can report whether a
+   * previously-applied change is still waiting on a reboot.
+   */
+  async updateCheck(): Promise<{
+    available: boolean;
+    current_version: string | null;
+    train: string | null;
+    new_version: string | null;
+    release_notes_url: string | null;
+    reboot_required: boolean | null;
+    reboot_reasons: string[];
+    raw: unknown;
+  }> {
     const det = await this.detect();
     if (det.mode === "websocket") {
-      // Try system.info which may contain update info
-      try {
-        const info = (await this.call("system.info")) as Record<string, unknown>;
-        return { available: info.update_available ?? false, info };
-      } catch (e) {
+      const status = (await this.call("update.status")) as {
+        code?: string;
+        error?: string | null;
+        status?: {
+          // On 25.04+ this is train/profile metadata, NOT the version number.
+          current_version?: { train?: string; profile?: string } | null;
+          new_version?: { version?: string; release_notes_url?: string } | null;
+        } | null;
+      };
+      if (status?.code && status.code !== "NORMAL") {
         throw new TrueNasError(
-          "Could not retrieve update information. TrueNAS 25.10 may require a specific method not yet supported."
+          `TrueNAS could not determine update status (code ${status.code})${
+            status.error ? `: ${status.error}` : ""
+          }.`
         );
       }
+      const s = status?.status ?? {};
+      const train = s.current_version?.train ?? null;
+      const nv = s.new_version ?? null;
+
+      // update.status.current_version carries train/profile, not the running
+      // version string — get the actual version from system.info.
+      let currentVersion: string | null = null;
+      try {
+        const info = (await this.call("system.info")) as { version?: string };
+        currentVersion = info?.version ?? null;
+      } catch {
+        // Non-fatal: the update answer stands even without the version label.
+      }
+
+      let rebootRequired: boolean | null = null;
+      let rebootReasons: string[] = [];
+      try {
+        const reboot = (await this.call("system.reboot.info")) as {
+          reboot_required_reasons?: { code?: string; reason?: string }[];
+        };
+        const reasons = reboot?.reboot_required_reasons ?? [];
+        rebootRequired = reasons.length > 0;
+        rebootReasons = reasons.map((r) => r.reason ?? r.code ?? "unknown");
+      } catch {
+        // Reboot info is a bonus; a failure here shouldn't sink the update check.
+      }
+
+      return {
+        available: nv !== null,
+        current_version: currentVersion,
+        train,
+        new_version: nv?.version ?? null,
+        release_notes_url: nv?.release_notes_url ?? null,
+        reboot_required: rebootRequired,
+        reboot_reasons: rebootReasons,
+        raw: status,
+      };
     }
-    // REST fallback
-    return (await this.restGet("/update")) as Record<string, unknown>;
+    // Legacy REST (SCALE <= 24.10 / CORE 13.x). This shape is version-dependent
+    // and not verified against a live legacy box, so treat it as best-effort.
+    const raw = (await this.restGet("/update/check_available")) as {
+      status?: string;
+      version?: string;
+    };
+    return {
+      available: raw?.status === "AVAILABLE",
+      current_version: null,
+      train: null,
+      new_version: raw?.version ?? null,
+      release_notes_url: null,
+      reboot_required: null,
+      reboot_reasons: [],
+      raw,
+    };
   }
 }
 
