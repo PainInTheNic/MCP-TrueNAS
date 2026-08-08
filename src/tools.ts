@@ -53,19 +53,35 @@ function respond(
   format: "markdown" | "json",
   markdown: () => string
 ): ToolResult {
-  const truncate = (text: string): string =>
-    text.slice(0, CHARACTER_LIMIT) +
-    "\n\n[Truncated — use limit/offset parameters or filters to narrow the result.]";
   if (format === "markdown") {
     const text = markdown();
-    return { content: [{ type: "text", text: text.length > CHARACTER_LIMIT ? truncate(text) : text }] };
+    const capped =
+      text.length > CHARACTER_LIMIT
+        ? text.slice(0, CHARACTER_LIMIT) +
+          "\n\n[Truncated — use limit/offset parameters or filters to narrow the result.]"
+        : text;
+    return { content: [{ type: "text", text: capped }] };
   }
   const json = JSON.stringify(structured, null, 2);
-  const oversized = json.length > CHARACTER_LIMIT;
-  return {
-    content: [{ type: "text", text: oversized ? truncate(json) : json }],
-    ...(oversized ? {} : { structuredContent: structured }),
-  };
+  if (json.length > CHARACTER_LIMIT) {
+    // Never slice serialized JSON — that produces unparseable output exactly
+    // when structure matters most. Emit a well-formed JSON envelope instead,
+    // and omit structuredContent so the client isn't handed the oversized blob.
+    const notice = JSON.stringify(
+      {
+        truncated: true,
+        note:
+          "Result exceeded the size limit. Narrow it with limit/offset or filters, " +
+          "or request response_format=markdown for a compact summary.",
+        character_limit: CHARACTER_LIMIT,
+        approx_size: json.length,
+      },
+      null,
+      2
+    );
+    return { content: [{ type: "text", text: notice }] };
+  }
+  return { content: [{ type: "text", text: json }], structuredContent: structured };
 }
 
 function errorResult(error: unknown): ToolResult {
@@ -213,9 +229,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         "Diagnose the connection to TrueNAS: shows the configured URL, whether an API key is present " +
         "(never the key itself), which API generation was detected (WebSocket JSON-RPC vs legacy REST), " +
         "and whether authentication succeeded. Call this first when any other truenas_ tool fails.",
+      inputSchema: z.object({ response_format: responseFormat }),
       annotations: READ_ONLY,
     },
-    async (): Promise<ToolResult> => {
+    async ({ response_format }): Promise<ToolResult> => {
       const output: Record<string, unknown> = {
         truenas_url: config.url || "(not set — define TRUENAS_URL in .env)",
         api_key_present: Boolean(config.apiKey),
@@ -239,7 +256,30 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       } else {
         output.hint = "Set TRUENAS_URL and TRUENAS_API_KEY in the .env file next to package.json, then retry.";
       }
-      return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
+      // Route through respond() so this tool honors the same result contract as
+      // the others (never emit text AND structuredContent together — some
+      // clients render the JSON in place of the summary).
+      return respond(output, response_format, () =>
+        [
+          "# TrueNAS connection",
+          "",
+          `- **URL**: ${output.truenas_url}`,
+          `- **API key present**: ${output.api_key_present ? "yes" : "no"}`,
+          `- **TLS verification**: ${output.tls_verification}`,
+          output.api_mode ? `- **API mode**: ${output.api_mode}` : null,
+          output.reachable !== undefined ? `- **Reachable**: ${output.reachable ? "yes" : "no"}` : null,
+          output.authenticated !== undefined
+            ? `- **Authenticated**: ${output.authenticated ? "yes" : "no"}`
+            : null,
+          output.truenas_version ? `- **Version**: ${output.truenas_version}` : null,
+          output.hostname ? `- **Hostname**: ${output.hostname}` : null,
+          output.uptime ? `- **Uptime**: ${output.uptime}` : null,
+          output.probe_error ? `- **Probe error**: ${output.probe_error}` : null,
+          output.hint ? `\n_${output.hint}_` : null,
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n")
+      );
     }
   );
 
