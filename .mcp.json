@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "truenas": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:\\Users\\Nic\\Documents\\Claude\\Code\\MCP-TrueNAS\\dist\\index.js"]
+    }
+  }
+}
