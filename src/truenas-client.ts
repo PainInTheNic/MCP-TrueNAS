@@ -545,9 +545,18 @@ export class TrueNasClient {
   async updateCheck(): Promise<Record<string, unknown>> {
     const det = await this.detect();
     if (det.mode === "websocket") {
-      return (await this.call("update.check_available")) as Record<string, unknown>;
+      // Try system.info which may contain update info
+      try {
+        const info = (await this.call("system.info")) as Record<string, unknown>;
+        return { available: info.update_available ?? false, info };
+      } catch (e) {
+        throw new TrueNasError(
+          "Could not retrieve update information. TrueNAS 25.10 may require a specific method not yet supported."
+        );
+      }
     }
-    return (await this.restGet("/update/check_available")) as Record<string, unknown>;
+    // REST fallback
+    return (await this.restGet("/update")) as Record<string, unknown>;
   }
 }
 
