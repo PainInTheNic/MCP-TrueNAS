@@ -59,6 +59,29 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("truenas-mcp-server running on stdio");
+
+  // Clean shutdown: close the MCP transport and the upstream TrueNAS WebSocket
+  // instead of leaking the authenticated connection on exit.
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`truenas-mcp-server received ${signal}, shutting down`);
+    try {
+      client?.close();
+    } catch {
+      // best-effort
+    }
+    void Promise.resolve(server.close?.()).finally(() => process.exit(0));
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // Last-resort safety net so a stray rejection/exception is logged to stderr
+  // (never stdout — that would corrupt the protocol stream) rather than
+  // crashing silently.
+  process.on("unhandledRejection", (reason) => console.error("Unhandled promise rejection:", reason));
+  process.on("uncaughtException", (error) => console.error("Uncaught exception:", error));
 }
 
 main().catch((error: unknown) => {

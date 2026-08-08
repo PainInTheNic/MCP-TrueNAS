@@ -87,6 +87,8 @@ export class TrueNasClient {
   private connectPromise: Promise<void> | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, PendingCall>();
+  /** Cached snapshot-query method name once feature-detected at runtime. */
+  private snapshotMethod: string | null = null;
 
   constructor(private readonly cfg: TrueNasConfig) {
     if (!cfg.url) {
@@ -490,10 +492,17 @@ export class TrueNasClient {
   /** Map of disk name -> temperature in °C (server caches readings ~5 min). */
   async diskTemperatures(): Promise<Record<string, number | null>> {
     const det = await this.detect();
+    // disk.temperatures wants an explicit list of names; the "empty array means
+    // all disks" convention is undocumented, so fetch the names first.
+    const disks = (await this.disks()) as { name?: string }[];
+    const names = disks
+      .map((d) => d.name)
+      .filter((n): n is string => typeof n === "string" && n.length > 0);
+    if (names.length === 0) return {};
     if (det.mode === "websocket") {
-      return (await this.call("disk.temperatures", [[], false])) as Record<string, number | null>;
+      return (await this.call("disk.temperatures", [names])) as Record<string, number | null>;
     }
-    return (await this.restPost("/disk/temperatures", { names: [] })) as Record<string, number | null>;
+    return (await this.restPost("/disk/temperatures", { names })) as Record<string, number | null>;
   }
 
   async services(): Promise<unknown[]> {
@@ -519,19 +528,38 @@ export class TrueNasClient {
   async snapshots(opts: { dataset?: string; limit: number; offset: number }): Promise<unknown[]> {
     const det = await this.detect();
     if (det.mode === "websocket") {
-      // The snapshot namespace was renamed between releases:
-      // 25.04 = zfs.snapshot.query, 25.10+ = pool.snapshot.query.
-      const isModern =
-        det.maxVersion !== null &&
-        (det.maxVersion[0] > 25 || (det.maxVersion[0] === 25 && det.maxVersion[1] >= 10));
-      const method = isModern ? "pool.snapshot.query" : "zfs.snapshot.query";
+      // The snapshot namespace was renamed between releases (25.04 =
+      // zfs.snapshot.query, 25.10+ = pool.snapshot.query). Feature-detect at
+      // runtime instead of guessing from a version string: try the modern name
+      // first, fall back on a "method not found", and cache whichever answers.
       const filters = opts.dataset ? [["dataset", "=", opts.dataset]] : [];
       const options = {
         limit: opts.limit,
         offset: opts.offset,
         extra: { properties: SNAPSHOT_PROPERTIES },
       };
-      return (await this.call(method, [filters, options])) as unknown[];
+      const candidates = this.snapshotMethod
+        ? [this.snapshotMethod]
+        : ["pool.snapshot.query", "zfs.snapshot.query"];
+      let lastError: unknown;
+      for (const method of candidates) {
+        try {
+          const res = (await this.call(method, [filters, options])) as unknown[];
+          this.snapshotMethod = method;
+          return res;
+        } catch (error) {
+          // friendlyRpc turns JSON-RPC -32601 into a "does not support" message;
+          // only then do we try the next candidate. Any other error is real.
+          if (error instanceof TrueNasError && /does not support/.test(error.message)) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw lastError instanceof Error
+        ? lastError
+        : new TrueNasError("No supported snapshot query method found on this TrueNAS version.");
     }
     const params: Record<string, unknown> = {
       limit: opts.limit,
@@ -635,6 +663,105 @@ export class TrueNasClient {
       reboot_reasons: [],
       raw,
     };
+  }
+
+  // ------------------------------------------------------------------
+  // v2 capabilities (apps, backups, shares, network, ...). These use the
+  // JSON-RPC API only: the legacy REST transport is deprecated (removed in
+  // TrueNAS 26) and unverified against a real legacy box, so rather than ship
+  // untested REST paths we surface a clear "needs 25.04+" error there.
+  // ------------------------------------------------------------------
+
+  private async wsOnly<T>(feature: string, fn: () => Promise<T>): Promise<T> {
+    const det = await this.detect();
+    if (det.mode !== "websocket") {
+      throw new TrueNasError(
+        `The ${feature} data requires the TrueNAS WebSocket API (25.04+); the legacy REST API is not supported for it.`
+      );
+    }
+    return fn();
+  }
+
+  /** Installed apps, including per-app upgrade availability. */
+  async apps(): Promise<unknown[]> {
+    return this.wsOnly("apps", async () => ((await this.call("app.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  async replicationTasks(): Promise<unknown[]> {
+    return this.wsOnly(
+      "replication task",
+      async () => (normalizeDates(await this.call("replication.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
+  async cloudsyncTasks(): Promise<unknown[]> {
+    return this.wsOnly(
+      "cloud sync task",
+      async () => (normalizeDates(await this.call("cloudsync.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
+  async smbShares(): Promise<unknown[]> {
+    return this.wsOnly("SMB share", async () => ((await this.call("sharing.smb.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  async nfsShares(): Promise<unknown[]> {
+    return this.wsOnly("NFS share", async () => ((await this.call("sharing.nfs.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  async iscsiTargets(): Promise<unknown[]> {
+    return this.wsOnly(
+      "iSCSI target",
+      async () => ((await this.call("iscsi.target.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
+  async interfaces(): Promise<unknown[]> {
+    return this.wsOnly(
+      "network interface",
+      async () => ((await this.call("interface.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
+  async networkSummary(): Promise<Record<string, unknown>> {
+    return this.wsOnly(
+      "network summary",
+      async () => (await this.call("network.general.summary")) as Record<string, unknown>
+    );
+  }
+
+  async snapshotTasks(): Promise<unknown[]> {
+    return this.wsOnly(
+      "snapshot task",
+      async () => (normalizeDates(await this.call("pool.snapshottask.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
+  async scrubTasks(): Promise<unknown[]> {
+    return this.wsOnly("scrub task", async () => ((await this.call("pool.scrub.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  async dockerStatus(): Promise<Record<string, unknown>> {
+    return this.wsOnly("Docker status", async () => (await this.call("docker.status")) as Record<string, unknown>);
+  }
+
+  async vms(): Promise<unknown[]> {
+    return this.wsOnly("virtual machine", async () => (normalizeDates(await this.call("vm.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  /** Close the WebSocket connection and fail any in-flight calls (shutdown). */
+  close(): void {
+    this.failAllPending(new TrueNasError("The client is shutting down."));
+    const sock = this.ws;
+    this.ws = null;
+    this.connectPromise = null;
+    if (sock) {
+      try {
+        sock.terminate();
+      } catch {
+        // Best-effort teardown.
+      }
+    }
   }
 }
 
