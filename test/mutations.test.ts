@@ -203,3 +203,40 @@ test("createScrubTask sends pool.scrub.create with numeric pool id", async () =>
     { pool: 1, threshold: 35, schedule: { minute: "0", hour: "0", dom: "1", month: "*", dow: "*" } },
   ]);
 });
+
+// --- Phases 4-5: destructive client methods (method + params only) ---
+
+test("deleteSnapshot sends pool.snapshot.delete", async () => {
+  const { client, calls } = stubClient();
+  await client.deleteSnapshot("tank/data@s", true);
+  assert.equal(calls[0].method, "pool.snapshot.delete");
+  assert.deepEqual(calls[0].params, ["tank/data@s", { recursive: true }]);
+});
+
+test("deleteDataset sends pool.dataset.delete with options", async () => {
+  const { client, calls } = stubClient();
+  await client.deleteDataset("tank/old", true, false);
+  assert.equal(calls[0].method, "pool.dataset.delete");
+  assert.deepEqual(calls[0].params, ["tank/old", { recursive: true, force: false }]);
+});
+
+test("rollbackSnapshot sends pool.snapshot.rollback", async () => {
+  const { client, calls } = stubClient();
+  await client.rollbackSnapshot("tank/data@good", true);
+  assert.equal(calls[0].method, "pool.snapshot.rollback");
+  assert.deepEqual(calls[0].params, ["tank/data@good", { recursive: true }]);
+});
+
+test("deleteUser sends user.delete with delete_group option", async () => {
+  const { client, calls } = stubClient();
+  await client.deleteUser(5, true);
+  assert.equal(calls[0].method, "user.delete");
+  assert.deepEqual(calls[0].params, [5, { delete_group: true }]);
+});
+
+test("deleteApp sends app.delete with remove_ix_volumes", async () => {
+  const { client, calls } = stubClient();
+  await client.deleteApp("prometheus", true);
+  assert.equal(calls[0].method, "app.delete");
+  assert.deepEqual(calls[0].params, ["prometheus", { remove_ix_volumes: true }]);
+});

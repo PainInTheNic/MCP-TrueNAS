@@ -99,6 +99,18 @@ the structured result is machine-validated by the MCP client.
 - `truenas_create_snapshot_task` / `truenas_update_snapshot_task` — automatic snapshot schedules
 - `truenas_create_scrub_task` / `truenas_update_scrub_task` — scheduled scrubs
 
+**Destructive (opt-in — set BOTH `TRUENAS_ENABLE_WRITE=1` and `TRUENAS_ENABLE_DESTRUCTIVE=1`)** — irreversible; `destructiveHint:true`; each requires a human elicitation confirmation and refuses if the client can't be prompted:
+- `truenas_delete_snapshot` / `truenas_delete_dataset` — delete a snapshot / dataset (destroys data)
+- `truenas_delete_smb_share` / `truenas_delete_nfs_share` — remove a share (underlying data kept)
+- `truenas_delete_app` / `truenas_delete_vm` — delete an app / VM (optionally its data too)
+- `truenas_delete_user` / `truenas_delete_group` — delete a user / group
+- `truenas_rollback_snapshot` — revert a dataset to a snapshot (discards newer data)
+- `truenas_lock_dataset` — lock an encrypted dataset
+- `truenas_pool_detach_disk` / `truenas_pool_offline_disk` / `truenas_pool_remove_vdev` — pool device operations
+- `truenas_upgrade_pool` — apply ZFS feature flags (irreversible)
+- `truenas_reboot_system` / `truenas_shutdown_system` — reboot / power off the NAS
+- `truenas_apply_update` — apply the pending OS update and reboot
+
 ## Write support & safety
 
 The server is **read-only until you opt in**, in tiers:
@@ -109,7 +121,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** safe writes ship now (`truenas_create_snapshot`, `truenas_update_dataset`). The destructive tier's flag and gating design exist, but **no destructive tool is registered yet** — those land in a later phase.
+> **Status:** the full read/write surface is implemented — **18 read, 22 safe-write, 17 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

@@ -1036,6 +1036,90 @@ export class TrueNasClient {
     return this.provision("pool.scrub.update", [id, data]);
   }
 
+  // ------------------------------------------------------------------
+  // Destructive operations. WebSocket-only; gated at the tool layer by
+  // TRUENAS_ENABLE_DESTRUCTIVE + a human elicitation confirmation.
+  // ------------------------------------------------------------------
+
+  async deleteSnapshot(id: string, recursive?: boolean): Promise<unknown> {
+    return this.provision("pool.snapshot.delete", recursive !== undefined ? [id, { recursive }] : [id]);
+  }
+
+  async deleteDataset(id: string, recursive?: boolean, force?: boolean): Promise<unknown> {
+    const options: Record<string, unknown> = {};
+    if (recursive !== undefined) options.recursive = recursive;
+    if (force !== undefined) options.force = force;
+    return this.provision("pool.dataset.delete", Object.keys(options).length ? [id, options] : [id]);
+  }
+
+  async deleteSmbShare(id: number): Promise<unknown> {
+    return this.provision("sharing.smb.delete", [id]);
+  }
+
+  async deleteNfsShare(id: number): Promise<unknown> {
+    return this.provision("sharing.nfs.delete", [id]);
+  }
+
+  async deleteApp(appName: string, removeIxVolumes?: boolean): Promise<JobOutcome> {
+    return this.wsOnly("app delete", () =>
+      this.callJob("app.delete", removeIxVolumes !== undefined ? [appName, { remove_ix_volumes: removeIxVolumes }] : [appName])
+    );
+  }
+
+  async deleteVm(id: number, deleteZvols?: boolean): Promise<unknown> {
+    return this.provision("vm.delete", deleteZvols !== undefined ? [id, { zvols: deleteZvols }] : [id]);
+  }
+
+  async deleteUser(id: number, deleteGroup?: boolean): Promise<unknown> {
+    return this.provision("user.delete", deleteGroup !== undefined ? [id, { delete_group: deleteGroup }] : [id]);
+  }
+
+  async deleteGroup(id: number, deleteUsers?: boolean): Promise<unknown> {
+    return this.provision("group.delete", deleteUsers !== undefined ? [id, { delete_users: deleteUsers }] : [id]);
+  }
+
+  /** pool.snapshot.rollback — revert a dataset to a snapshot (destroys newer data). */
+  async rollbackSnapshot(id: string, recursive?: boolean): Promise<unknown> {
+    return this.provision("pool.snapshot.rollback", [id, recursive !== undefined ? { recursive } : {}]);
+  }
+
+  async lockDataset(id: string, forceUmount?: boolean): Promise<JobOutcome> {
+    return this.wsOnly("dataset lock", () =>
+      this.callJob("pool.dataset.lock", [id, forceUmount !== undefined ? { force_umount: forceUmount } : {}])
+    );
+  }
+
+  async detachPoolDisk(poolId: number, label: string): Promise<unknown> {
+    return this.provision("pool.detach", [poolId, { label }]);
+  }
+
+  async offlinePoolDisk(poolId: number, label: string): Promise<unknown> {
+    return this.provision("pool.offline", [poolId, { label }]);
+  }
+
+  async removePoolVdev(poolId: number, label: string): Promise<JobOutcome> {
+    return this.wsOnly("pool remove", () => this.callJob("pool.remove", [poolId, { label }]));
+  }
+
+  async upgradePool(poolId: number): Promise<unknown> {
+    return this.provision("pool.upgrade", [poolId]);
+  }
+
+  async rebootSystem(reason: string): Promise<unknown> {
+    // system.reboot's exact signature is undocumented on v25.10; mirror system.shutdown(reason, {}).
+    return this.provision("system.reboot", [reason, {}]);
+  }
+
+  async shutdownSystem(reason: string, delay?: number): Promise<JobOutcome> {
+    return this.wsOnly("system shutdown", () =>
+      this.callJob("system.shutdown", [reason, delay !== undefined ? { delay } : {}])
+    );
+  }
+
+  async applyUpdate(): Promise<JobOutcome> {
+    return this.wsOnly("update run", () => this.callJob("update.run", [{}]));
+  }
+
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */
   close(): void {
     this.failAllPending(new TrueNasError("The client is shutting down."));

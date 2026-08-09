@@ -14,6 +14,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/server";
+import { inputRequired, acceptedContent } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { TrueNasClient, TrueNasConfig, TrueNasError } from "./truenas-client.js";
 
@@ -37,6 +38,11 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 // like Claude Code auto-approve read-only tools, which would let a write run
 // unprompted. destructiveHint stays false because these are reversible.
 const SAFE_WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
+
+// Destructive (irreversible / availability-loss) writes. destructiveHint nudges
+// clients to prompt, but the real gate is the env flag + the elicitation
+// confirmation in confirmDestructive() (annotations are only advisory hints).
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } as const;
 
 const responseFormat = z
   .enum(["markdown", "json"])
@@ -125,6 +131,110 @@ function assertAllowedTarget(config: TrueNasConfig, target: string): void {
   throw new TrueNasError(
     `Refusing to write to '${target}': TRUENAS_TEST_DATASET='${allowed}' restricts writes to that dataset ` +
       `and its children (test-safety guard). Unset TRUENAS_TEST_DATASET for normal use.`
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type GateArgs = Record<string, any>;
+type GateResult = { proceed: true } | { halt: ToolResult | ReturnType<typeof inputRequired> };
+
+/**
+ * Human-confirmation gate for destructive ops, via MCP elicitation:
+ *  - no elicitation capability on the client  -> refuse (fail closed);
+ *  - first call                                -> return an elicitation asking to confirm;
+ *  - retry with explicit confirm=true (accept) -> proceed;
+ *  - declined / cancelled / absent answer      -> refuse.
+ * The env flag (TRUENAS_ENABLE_DESTRUCTIVE) already keeps these tools out of
+ * tools/list entirely unless the operator opted in; this is the second gate.
+ */
+function confirmDestructive(server: McpServer, ctx: unknown, action: string): GateResult {
+  const caps = (
+    server as unknown as { server?: { getClientCapabilities?: () => { elicitation?: unknown } | undefined } }
+  ).server?.getClientCapabilities?.();
+  if (!caps?.elicitation) {
+    return {
+      halt: errorResult(
+        new TrueNasError(
+          `Refusing "${action}": destructive operations require a client that can prompt for human confirmation ` +
+            `(MCP elicitation), and this client did not advertise that capability. Do it in the TrueNAS UI, or use ` +
+            `an elicitation-capable client.`
+        )
+      ),
+    };
+  }
+  const responses = (ctx as { mcpReq?: { inputResponses?: Record<string, unknown> } } | undefined)?.mcpReq
+    ?.inputResponses;
+  const accepted = acceptedContent<{ confirm?: boolean }>(responses ?? {}, "confirm");
+  if (accepted?.confirm === true) return { proceed: true };
+  const answered = !!responses && Object.prototype.hasOwnProperty.call(responses, "confirm");
+  if (answered) {
+    return { halt: errorResult(new TrueNasError(`"${action}" was not confirmed — no changes made.`)) };
+  }
+  return {
+    halt: inputRequired({
+      inputRequests: {
+        confirm: inputRequired.elicit({
+          message: `Confirm destructive action: ${action}. This cannot be undone.`,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              confirm: { type: "boolean", title: "Confirm", description: `Proceed with: ${action}?` },
+            },
+            required: ["confirm"],
+          },
+        }),
+      },
+    }),
+  };
+}
+
+interface DestructiveSpec {
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: z.ZodTypeAny;
+  method: string;
+  action: (args: GateArgs) => string;
+  target: (args: GateArgs) => string;
+  /** Dataset path to check against TRUENAS_TEST_DATASET, if any. */
+  guardTarget?: (args: GateArgs) => string | undefined;
+  run: (client: TrueNasClient, args: GateArgs) => Promise<unknown>;
+  summary: (args: GateArgs) => string;
+}
+
+/** Register a destructive tool: env-gated (by the caller) + elicitation-gated + audit-logged. */
+function registerDestructive(
+  server: McpServer,
+  config: TrueNasConfig,
+  getClient: () => TrueNasClient,
+  spec: DestructiveSpec
+): void {
+  server.registerTool(
+    spec.name,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    { title: spec.title, description: spec.description, inputSchema: spec.inputSchema as any, annotations: DESTRUCTIVE },
+    async (args: GateArgs, ctx: unknown) => {
+      const label = spec.action(args);
+      const gate = confirmDestructive(server, ctx, label);
+      if ("halt" in gate) return gate.halt;
+      try {
+        const guard = spec.guardTarget?.(args);
+        if (guard) assertAllowedTarget(config, guard);
+        await spec.run(getClient(), args);
+        auditLog({ tool: spec.name, method: spec.method, target: spec.target(args), outcome: "success" });
+        const format = (args.response_format ?? "markdown") as "markdown" | "json";
+        return respond({ done: true, action: label }, format, () => spec.summary(args));
+      } catch (error) {
+        auditLog({
+          tool: spec.name,
+          method: spec.method,
+          target: spec.target(args),
+          outcome: `error: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return errorResult(error);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }
   );
 }
 
@@ -2611,5 +2721,306 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+  }
+
+  // ================================================================
+  // Destructive tier — registered ONLY when BOTH TRUENAS_ENABLE_WRITE=1 AND
+  // TRUENAS_ENABLE_DESTRUCTIVE=1. Each is gated by a human elicitation
+  // confirmation and fails closed when the client can't be prompted. The
+  // catastrophic disk.wipe / pool.create / pool.export-with-destroy are
+  // intentionally NOT implemented (UI-only).
+  // ================================================================
+  if (config.enableWrite && config.enableDestructive) {
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_snapshot",
+      title: "Delete ZFS Snapshot",
+      description:
+        "Permanently delete a ZFS snapshot. IRREVERSIBLE. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 and a human " +
+        "confirmation; refuses if the client can't be prompted for confirmation.",
+      inputSchema: z.object({
+        snapshot: z.string().describe("Snapshot id, e.g. 'tank/data@snap1'"),
+        recursive: z.boolean().default(false).describe("Also delete child snapshots"),
+        response_format: responseFormat,
+      }),
+      method: "pool.snapshot.delete",
+      action: (a) => `delete snapshot ${a.snapshot}`,
+      target: (a) => a.snapshot,
+      guardTarget: (a) => a.snapshot,
+      run: (c, a) => c.deleteSnapshot(a.snapshot, a.recursive),
+      summary: (a) => `Deleted snapshot **${a.snapshot}**.`,
+    });
+
+    // ---- D1: deletes ----
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_dataset",
+      title: "Delete Dataset",
+      description:
+        "Permanently delete a ZFS dataset/zvol AND ALL ITS DATA (with recursive, its children too). " +
+        "IRREVERSIBLE. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + human confirmation.",
+      inputSchema: z.object({
+        dataset: z.string().describe("Dataset id / full path, e.g. 'tank/old'"),
+        recursive: z.boolean().default(false).describe("Also delete child datasets"),
+        force: z.boolean().default(false).describe("Delete even if busy (e.g. actively shared)"),
+        response_format: responseFormat,
+      }),
+      method: "pool.dataset.delete",
+      action: (a) => `delete dataset ${a.dataset}${a.recursive ? " and its children" : ""} (destroys its data)`,
+      target: (a) => a.dataset,
+      guardTarget: (a) => a.dataset,
+      run: (c, a) => c.deleteDataset(a.dataset, a.recursive, a.force),
+      summary: (a) => `Deleted dataset **${a.dataset}**.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_smb_share",
+      title: "Delete SMB Share",
+      description:
+        "Delete an SMB share by id (terminates active client connections). The underlying data is NOT deleted. " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("SMB share id"), response_format: responseFormat }),
+      method: "sharing.smb.delete",
+      action: (a) => `delete SMB share ${a.id}`,
+      target: (a) => `smb:${a.id}`,
+      run: (c, a) => c.deleteSmbShare(a.id),
+      summary: (a) => `Deleted SMB share ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_nfs_share",
+      title: "Delete NFS Share",
+      description:
+        "Delete an NFS export by id. The underlying data is NOT deleted. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("NFS share id"), response_format: responseFormat }),
+      method: "sharing.nfs.delete",
+      action: (a) => `delete NFS share ${a.id}`,
+      target: (a) => `nfs:${a.id}`,
+      run: (c, a) => c.deleteNfsShare(a.id),
+      summary: (a) => `Deleted NFS export ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_app",
+      title: "Delete App",
+      description:
+        "Delete an installed app. By default its persistent ix-volumes are KEPT; set remove_data=true to also " +
+        "delete them (destroys app data). Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        app: z.string().describe("App name"),
+        remove_data: z.boolean().default(false).describe("Also delete the app's ix-volumes (persistent data)"),
+        response_format: responseFormat,
+      }),
+      method: "app.delete",
+      action: (a) => `delete app ${a.app}${a.remove_data ? " AND its data" : ""}`,
+      target: (a) => a.app,
+      run: (c, a) => c.deleteApp(a.app, a.remove_data),
+      summary: (a) => `Deleted app **${a.app}**${a.remove_data ? " and its data" : ""}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_vm",
+      title: "Delete VM",
+      description:
+        "Delete a virtual machine by id. Set delete_disks=true to also destroy its zvol disks (destroys VM " +
+        "data). Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        id: z.number().int().describe("VM id"),
+        delete_disks: z.boolean().default(false).describe("Also delete the VM's zvol disks"),
+        response_format: responseFormat,
+      }),
+      method: "vm.delete",
+      action: (a) => `delete VM ${a.id}${a.delete_disks ? " AND its disks" : ""}`,
+      target: (a) => `vm:${a.id}`,
+      run: (c, a) => c.deleteVm(a.id, a.delete_disks),
+      summary: (a) => `Deleted VM ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_user",
+      title: "Delete User",
+      description:
+        "Delete a local user account by id. Its primary group is removed if unused (unless disabled). " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        id: z.number().int().describe("User id"),
+        delete_primary_group: z.boolean().default(true).describe("Delete the user's primary group if unused"),
+        response_format: responseFormat,
+      }),
+      method: "user.delete",
+      action: (a) => `delete user ${a.id}`,
+      target: (a) => `user:${a.id}`,
+      run: (c, a) => c.deleteUser(a.id, a.delete_primary_group),
+      summary: (a) => `Deleted user ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_group",
+      title: "Delete Group",
+      description: "Delete a local group by id. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        id: z.number().int().describe("Group id"),
+        delete_users: z.boolean().default(false).describe("Also delete users whose primary group this is"),
+        response_format: responseFormat,
+      }),
+      method: "group.delete",
+      action: (a) => `delete group ${a.id}`,
+      target: (a) => `group:${a.id}`,
+      run: (c, a) => c.deleteGroup(a.id, a.delete_users),
+      summary: (a) => `Deleted group ${a.id}.`,
+    });
+
+    // ---- D2: catastrophic (still elicitation-gated; disk.wipe/pool.create/pool.export are UI-only) ----
+    registerDestructive(server, config, getClient, {
+      name: "truenas_rollback_snapshot",
+      title: "Roll Back to Snapshot",
+      description:
+        "Revert a dataset to one of its snapshots, DISCARDING all newer data and intermediate snapshots. " +
+        "IRREVERSIBLE. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        snapshot: z.string().describe("Snapshot id to roll back to, e.g. 'tank/data@good'"),
+        recursive: z.boolean().default(false).describe("Also roll back child datasets"),
+        response_format: responseFormat,
+      }),
+      method: "pool.snapshot.rollback",
+      action: (a) => `roll back to snapshot ${a.snapshot} (discards all newer data)`,
+      target: (a) => a.snapshot,
+      guardTarget: (a) => a.snapshot,
+      run: (c, a) => c.rollbackSnapshot(a.snapshot, a.recursive),
+      summary: (a) => `Rolled back to **${a.snapshot}** — newer data discarded.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_lock_dataset",
+      title: "Lock Encrypted Dataset",
+      description:
+        "Lock an encrypted dataset, making its data inaccessible until unlocked with the key/passphrase. " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        dataset: z.string().describe("Dataset id to lock"),
+        force_umount: z.boolean().default(false).describe("Force-unmount before locking"),
+        response_format: responseFormat,
+      }),
+      method: "pool.dataset.lock",
+      action: (a) => `lock dataset ${a.dataset} (data becomes inaccessible)`,
+      target: (a) => a.dataset,
+      guardTarget: (a) => a.dataset,
+      run: (c, a) => c.lockDataset(a.dataset, a.force_umount),
+      summary: (a) => `Locked dataset **${a.dataset}**.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_pool_detach_disk",
+      title: "Detach Disk from Pool",
+      description:
+        "Detach a disk/vdev from a pool by its GUID or device name, reducing redundancy. Requires " +
+        "TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        pool_id: z.number().int().describe("Numeric pool id"),
+        label: z.string().describe("vdev GUID or device name to detach"),
+        response_format: responseFormat,
+      }),
+      method: "pool.detach",
+      action: (a) => `detach disk ${a.label} from pool ${a.pool_id}`,
+      target: (a) => `pool:${a.pool_id}/${a.label}`,
+      run: (c, a) => c.detachPoolDisk(a.pool_id, a.label),
+      summary: (a) => `Detached ${a.label} from pool ${a.pool_id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_pool_offline_disk",
+      title: "Offline a Pool Disk",
+      description:
+        "Take a pool disk/vdev offline by GUID or device name, degrading redundancy (reversible by bringing it " +
+        "online). Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        pool_id: z.number().int().describe("Numeric pool id"),
+        label: z.string().describe("vdev GUID or device name"),
+        response_format: responseFormat,
+      }),
+      method: "pool.offline",
+      action: (a) => `offline disk ${a.label} in pool ${a.pool_id}`,
+      target: (a) => `pool:${a.pool_id}/${a.label}`,
+      run: (c, a) => c.offlinePoolDisk(a.pool_id, a.label),
+      summary: (a) => `Took ${a.label} offline in pool ${a.pool_id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_pool_remove_vdev",
+      title: "Remove a Pool vdev",
+      description:
+        "Remove a device/vdev from a pool by GUID or device name. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        pool_id: z.number().int().describe("Numeric pool id"),
+        label: z.string().describe("vdev GUID or device name"),
+        response_format: responseFormat,
+      }),
+      method: "pool.remove",
+      action: (a) => `remove vdev ${a.label} from pool ${a.pool_id}`,
+      target: (a) => `pool:${a.pool_id}/${a.label}`,
+      run: (c, a) => c.removePoolVdev(a.pool_id, a.label),
+      summary: (a) => `Removed ${a.label} from pool ${a.pool_id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_upgrade_pool",
+      title: "Upgrade Pool Feature Flags",
+      description:
+        "Apply the latest ZFS feature flags to a pool. IRREVERSIBLE — the pool can no longer be imported by " +
+        "older TrueNAS/ZFS versions afterward. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ pool_id: z.number().int().describe("Numeric pool id"), response_format: responseFormat }),
+      method: "pool.upgrade",
+      action: (a) => `upgrade feature flags on pool ${a.pool_id} (irreversible)`,
+      target: (a) => `pool:${a.pool_id}`,
+      run: (c, a) => c.upgradePool(a.pool_id),
+      summary: (a) => `Upgraded pool ${a.pool_id} feature flags.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_reboot_system",
+      title: "Reboot TrueNAS",
+      description:
+        "Reboot the entire TrueNAS system — interrupts ALL services and access until it comes back up. " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        reason: z.string().default("Requested via MCP").describe("Reason (logged)"),
+        response_format: responseFormat,
+      }),
+      method: "system.reboot",
+      action: () => `REBOOT the entire TrueNAS system`,
+      target: () => "system",
+      run: (c, a) => c.rebootSystem(a.reason),
+      summary: () => `Reboot initiated — the NAS will be offline until it comes back up.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_shutdown_system",
+      title: "Shut Down TrueNAS",
+      description:
+        "Power off the entire TrueNAS system — it stays OFFLINE until manually powered back on. Requires " +
+        "TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        reason: z.string().default("Requested via MCP").describe("Reason (logged)"),
+        delay_seconds: z.number().int().min(0).optional().describe("Delay before powering off"),
+        response_format: responseFormat,
+      }),
+      method: "system.shutdown",
+      action: () => `SHUT DOWN the entire TrueNAS system`,
+      target: () => "system",
+      run: (c, a) => c.shutdownSystem(a.reason, a.delay_seconds),
+      summary: () => `Shutdown initiated — the NAS will power off.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_apply_update",
+      title: "Apply System Update",
+      description:
+        "Download and apply the pending TrueNAS OS update, then REBOOT into the new version. Check availability " +
+        "first with truenas_check_updates. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      method: "update.run",
+      action: () => `apply the pending system update and reboot`,
+      target: () => "system",
+      run: (c) => c.applyUpdate(),
+      summary: () => `System update started — the NAS will reboot into the new version.`,
+    });
   }
 }
