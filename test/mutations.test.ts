@@ -157,3 +157,49 @@ test("createNfsShare maps readonly to ro and includes networks", async () => {
   assert.equal(calls[0].method, "sharing.nfs.create");
   assert.deepEqual(calls[0].params, [{ path: "/mnt/tank/backups", networks: ["192.168.0.0/24"], ro: true }]);
 });
+
+// --- Phase 3: provisioning (identity + scheduling) ---
+
+test("createUser sends user.create with username/full_name/password/group_create", async () => {
+  const { client, calls } = stubClient();
+  await client.createUser({ username: "svc", full_name: "Service", password: "s3cret", group_create: true });
+  assert.equal(calls[0].method, "user.create");
+  assert.deepEqual(calls[0].params, [{ username: "svc", full_name: "Service", password: "s3cret", group_create: true }]);
+});
+
+test("setUserPassword sends user.set_password keyed by username", async () => {
+  const { client, calls } = stubClient();
+  await client.setUserPassword("svc", "n3wpass");
+  assert.equal(calls[0].method, "user.set_password");
+  assert.deepEqual(calls[0].params, [{ username: "svc", new_password: "n3wpass" }]);
+});
+
+test("createGroup sends group.create with name (+optionals)", async () => {
+  const { client, calls } = stubClient();
+  await client.createGroup({ name: "media", smb: true });
+  assert.equal(calls[0].method, "group.create");
+  assert.deepEqual(calls[0].params, [{ name: "media", smb: true }]);
+});
+
+test("createSnapshotTask sends pool.snapshottask.create with lifetime + schedule", async () => {
+  const { client, calls } = stubClient();
+  await client.createSnapshotTask({
+    dataset: "tank/appdata",
+    lifetime_value: 2,
+    lifetime_unit: "WEEK",
+    schedule: { minute: "0", hour: "0", dom: "*", month: "*", dow: "*" },
+  });
+  assert.equal(calls[0].method, "pool.snapshottask.create");
+  assert.deepEqual(calls[0].params, [
+    { dataset: "tank/appdata", lifetime_value: 2, lifetime_unit: "WEEK", schedule: { minute: "0", hour: "0", dom: "*", month: "*", dow: "*" } },
+  ]);
+});
+
+test("createScrubTask sends pool.scrub.create with numeric pool id", async () => {
+  const { client, calls } = stubClient();
+  await client.createScrubTask({ pool: 1, threshold: 35, schedule: { minute: "0", hour: "0", dom: "1", month: "*", dow: "*" } });
+  assert.equal(calls[0].method, "pool.scrub.create");
+  assert.deepEqual(calls[0].params, [
+    { pool: 1, threshold: 35, schedule: { minute: "0", hour: "0", dom: "1", month: "*", dow: "*" } },
+  ]);
+});

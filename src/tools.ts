@@ -2296,5 +2296,320 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ---------------- create user ----------------
+    server.registerTool(
+      "truenas_create_user",
+      {
+        title: "Create User",
+        description:
+          "Create a local user account. Provide a password OR set password_disabled=true for a key-only / no-" +
+          "password account. The password is never logged or echoed back. Reversible (delete the user). " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          username: z.string().describe("Login name, e.g. 'backupsvc'"),
+          full_name: z.string().describe("Display name / description"),
+          password: z.string().optional().describe("Password — kept out of logs and output; omit for a no-password account"),
+          password_disabled: z.boolean().default(false).describe("Create with no password (key-only)"),
+          create_primary_group: z.boolean().default(true).describe("Auto-create a primary group for this user"),
+          group_id: z.number().int().optional().describe("Existing primary group id (only if create_primary_group=false)"),
+          shell: z.string().optional().describe("Login shell, e.g. '/usr/bin/bash'"),
+          smb: z.boolean().optional().describe("Allow SMB (Samba) authentication for this user"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), username: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ username, full_name, password, password_disabled, create_primary_group, group_id, shell, smb, response_format }): Promise<ToolResult> => {
+        try {
+          if (!password && !password_disabled) {
+            throw new TrueNasError("Provide a password, or set password_disabled=true for a no-password account.");
+          }
+          if (!create_primary_group && group_id === undefined) {
+            throw new TrueNasError("Set create_primary_group=true, or provide an existing group_id.");
+          }
+          await getClient().createUser({
+            username,
+            full_name,
+            password,
+            password_disabled: password_disabled || undefined,
+            group_create: create_primary_group,
+            group: create_primary_group ? undefined : group_id,
+            shell,
+            smb,
+          });
+          auditLog({ tool: "truenas_create_user", method: "user.create", target: username, outcome: "success" });
+          return respond({ created: true, username }, response_format, () => `Created user **${username}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_user", method: "user.create", target: username, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update user ----------------
+    server.registerTool(
+      "truenas_update_user",
+      {
+        title: "Update User",
+        description:
+          "Update a user account by id (see truenas_list_* / the TrueNAS UI). Supply only fields to change. A " +
+          "password, if given, is never logged or echoed. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("User id"),
+          full_name: z.string().optional(),
+          shell: z.string().optional(),
+          smb: z.boolean().optional(),
+          locked: z.boolean().optional().describe("Lock (disable) the account"),
+          password: z.string().optional().describe("New password — kept out of logs and output"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, full_name, shell, smb, locked, password, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (full_name !== undefined) data.full_name = full_name;
+          if (shell !== undefined) data.shell = shell;
+          if (smb !== undefined) data.smb = smb;
+          if (locked !== undefined) data.locked = locked;
+          if (password !== undefined) data.password = password;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateUser(id, data);
+          auditLog({ tool: "truenas_update_user", method: "user.update", target: `user:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated user ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_user", method: "user.update", target: `user:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- set user password ----------------
+    server.registerTool(
+      "truenas_set_user_password",
+      {
+        title: "Set User Password",
+        description:
+          "Set a local user's password (by username). The new password is never logged or echoed back. " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          username: z.string().describe("Username whose password to set"),
+          new_password: z.string().min(1).describe("The new password — kept out of logs and output"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), username: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ username, new_password, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().setUserPassword(username, new_password);
+          auditLog({ tool: "truenas_set_user_password", method: "user.set_password", target: username, outcome: "success" });
+          return respond({ updated: true, username }, response_format, () => `Set password for user **${username}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_set_user_password", method: "user.set_password", target: username, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create group ----------------
+    server.registerTool(
+      "truenas_create_group",
+      {
+        title: "Create Group",
+        description: "Create a local group. Reversible (delete the group). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          name: z.string().describe("Group name"),
+          gid: z.number().int().optional().describe("Explicit GID (auto-assigned if omitted)"),
+          smb: z.boolean().optional().describe("Usable for SMB share ACLs"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), name: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ name, gid, smb, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().createGroup({ name, gid, smb });
+          auditLog({ tool: "truenas_create_group", method: "group.create", target: name, outcome: "success" });
+          return respond({ created: true, name }, response_format, () => `Created group **${name}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_group", method: "group.create", target: name, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update group ----------------
+    server.registerTool(
+      "truenas_update_group",
+      {
+        title: "Update Group",
+        description: "Update a group by id. Supply only fields to change. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("Group id"),
+          name: z.string().optional(),
+          smb: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, name, smb, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (name !== undefined) data.name = name;
+          if (smb !== undefined) data.smb = smb;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateGroup(id, data);
+          auditLog({ tool: "truenas_update_group", method: "group.update", target: `group:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated group ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_group", method: "group.update", target: `group:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create periodic snapshot task ----------------
+    server.registerTool(
+      "truenas_create_snapshot_task",
+      {
+        title: "Create Periodic Snapshot Task",
+        description:
+          "Set up an automatic snapshot schedule for a dataset with a retention policy. Reversible. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Dataset to snapshot, e.g. 'tank/appdata'"),
+          recursive: z.boolean().default(false).describe("Include child datasets"),
+          keep_value: z.number().int().min(1).default(2).describe("Retention amount"),
+          keep_unit: z.enum(["HOUR", "DAY", "WEEK", "MONTH", "YEAR"]).default("WEEK").describe("Retention unit"),
+          hour: z.string().default("0").describe("Cron hour 0-23"),
+          minute: z.string().default("0").describe("Cron minute 0-59"),
+          enabled: z.boolean().default(true),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), dataset: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, recursive, keep_value, keep_unit, hour, minute, enabled, response_format }): Promise<ToolResult> => {
+        try {
+          assertAllowedTarget(config, dataset);
+          await getClient().createSnapshotTask({
+            dataset,
+            recursive,
+            lifetime_value: keep_value,
+            lifetime_unit: keep_unit,
+            enabled,
+            schedule: { minute, hour, dom: "*", month: "*", dow: "*" },
+          });
+          auditLog({ tool: "truenas_create_snapshot_task", method: "pool.snapshottask.create", target: dataset, outcome: "success" });
+          return respond({ created: true, dataset }, response_format, () =>
+            `Created snapshot task for **${dataset}** at ${hour.padStart(2, "0")}:${minute.padStart(2, "0")}, keeping ${keep_value} ${keep_unit.toLowerCase()}(s).`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_snapshot_task", method: "pool.snapshottask.create", target: dataset, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update periodic snapshot task ----------------
+    server.registerTool(
+      "truenas_update_snapshot_task",
+      {
+        title: "Update Periodic Snapshot Task",
+        description: "Update a periodic snapshot task by id (enable/disable, recursive). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("Snapshot task id (see truenas_list_snapshot_tasks)"),
+          enabled: z.boolean().optional(),
+          recursive: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, enabled, recursive, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (enabled !== undefined) data.enabled = enabled;
+          if (recursive !== undefined) data.recursive = recursive;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateSnapshotTask(id, data);
+          auditLog({ tool: "truenas_update_snapshot_task", method: "pool.snapshottask.update", target: `snaptask:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated snapshot task ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_snapshot_task", method: "pool.snapshottask.update", target: `snaptask:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create scrub schedule ----------------
+    server.registerTool(
+      "truenas_create_scrub_task",
+      {
+        title: "Create Scheduled Scrub Task",
+        description:
+          "Schedule automatic scrubs for a pool. Note: pool is the numeric pool id (from pool.query), not the " +
+          "name. Reversible. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          pool_id: z.number().int().describe("Numeric pool id (from the TrueNAS API / pool.query)"),
+          threshold_days: z.number().int().min(0).default(35).describe("Minimum days between scrubs"),
+          day_of_month: z.string().default("1").describe("Cron day-of-month to run"),
+          enabled: z.boolean().default(true),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), pool_id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ pool_id, threshold_days, day_of_month, enabled, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().createScrubTask({
+            pool: pool_id,
+            threshold: threshold_days,
+            enabled,
+            schedule: { minute: "0", hour: "0", dom: day_of_month, month: "*", dow: "*" },
+          });
+          auditLog({ tool: "truenas_create_scrub_task", method: "pool.scrub.create", target: `pool:${pool_id}`, outcome: "success" });
+          return respond({ created: true, pool_id }, response_format, () => `Created scrub schedule for pool id ${pool_id} (every ${threshold_days} days).`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_scrub_task", method: "pool.scrub.create", target: `pool:${pool_id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update scrub schedule ----------------
+    server.registerTool(
+      "truenas_update_scrub_task",
+      {
+        title: "Update Scheduled Scrub Task",
+        description: "Update a scrub schedule by id (enable/disable, threshold). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("Scrub task id (see truenas_list_scrub_tasks)"),
+          enabled: z.boolean().optional(),
+          threshold_days: z.number().int().min(0).optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, enabled, threshold_days, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (enabled !== undefined) data.enabled = enabled;
+          if (threshold_days !== undefined) data.threshold = threshold_days;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateScrubTask(id, data);
+          auditLog({ tool: "truenas_update_scrub_task", method: "pool.scrub.update", target: `scrubtask:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated scrub task ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_scrub_task", method: "pool.scrub.update", target: `scrubtask:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 }

@@ -950,6 +950,92 @@ export class TrueNasClient {
     return this.provision("sharing.nfs.update", [id, data]);
   }
 
+  async createUser(opts: {
+    username: string;
+    full_name: string;
+    password?: string;
+    password_disabled?: boolean;
+    group?: number;
+    group_create?: boolean;
+    shell?: string;
+    home?: string;
+    smb?: boolean;
+    groups?: number[];
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { username: opts.username, full_name: opts.full_name };
+    if (opts.password !== undefined) data.password = opts.password;
+    if (opts.password_disabled !== undefined) data.password_disabled = opts.password_disabled;
+    if (opts.group !== undefined) data.group = opts.group;
+    if (opts.group_create !== undefined) data.group_create = opts.group_create;
+    if (opts.shell !== undefined) data.shell = opts.shell;
+    if (opts.home !== undefined) data.home = opts.home;
+    if (opts.smb !== undefined) data.smb = opts.smb;
+    if (opts.groups !== undefined) data.groups = opts.groups;
+    return this.provision("user.create", [data]);
+  }
+
+  async updateUser(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("user.update", [id, data]);
+  }
+
+  /** user.set_password — username-keyed (NOT id). new_password is a secret. */
+  async setUserPassword(username: string, newPassword: string): Promise<unknown> {
+    return this.provision("user.set_password", [{ username, new_password: newPassword }]);
+  }
+
+  async createGroup(opts: { name: string; gid?: number; smb?: boolean }): Promise<unknown> {
+    const data: Record<string, unknown> = { name: opts.name };
+    if (opts.gid !== undefined) data.gid = opts.gid;
+    if (opts.smb !== undefined) data.smb = opts.smb;
+    return this.provision("group.create", [data]);
+  }
+
+  async updateGroup(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("group.update", [id, data]);
+  }
+
+  async createSnapshotTask(opts: {
+    dataset: string;
+    recursive?: boolean;
+    lifetime_value?: number;
+    lifetime_unit?: string;
+    naming_schema?: string;
+    enabled?: boolean;
+    schedule?: Record<string, string>;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { dataset: opts.dataset };
+    if (opts.recursive !== undefined) data.recursive = opts.recursive;
+    if (opts.lifetime_value !== undefined) data.lifetime_value = opts.lifetime_value;
+    if (opts.lifetime_unit !== undefined) data.lifetime_unit = opts.lifetime_unit;
+    if (opts.naming_schema !== undefined) data.naming_schema = opts.naming_schema;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    if (opts.schedule !== undefined) data.schedule = opts.schedule;
+    return this.provision("pool.snapshottask.create", [data]);
+  }
+
+  async updateSnapshotTask(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("pool.snapshottask.update", [id, data]);
+  }
+
+  async createScrubTask(opts: {
+    pool: number;
+    threshold?: number;
+    enabled?: boolean;
+    description?: string;
+    schedule?: Record<string, string>;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { pool: opts.pool };
+    if (opts.threshold !== undefined) data.threshold = opts.threshold;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    if (opts.description !== undefined) data.description = opts.description;
+    if (opts.schedule !== undefined) data.schedule = opts.schedule;
+    return this.provision("pool.scrub.create", [data]);
+  }
+
+  async updateScrubTask(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("pool.scrub.update", [id, data]);
+  }
+
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */
   close(): void {
     this.failAllPending(new TrueNasError("The client is shutting down."));

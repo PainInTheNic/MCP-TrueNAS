@@ -91,6 +91,13 @@ the structured result is machine-validated by the MCP client.
 - `truenas_manage_app` — start / stop / redeploy / upgrade / rollback an installed app
 - `truenas_manage_vm` — start / stop / restart / suspend / resume a VM
 - `truenas_run_scrub` — start a manual pool scrub
+- `truenas_create_dataset` / `truenas_rename_dataset` — create a dataset or zvol; rename a dataset
+- `truenas_create_smb_share` / `truenas_update_smb_share` — SMB shares
+- `truenas_create_nfs_share` / `truenas_update_nfs_share` — NFS exports
+- `truenas_create_user` / `truenas_update_user` / `truenas_set_user_password` — local users (passwords never logged)
+- `truenas_create_group` / `truenas_update_group` — local groups
+- `truenas_create_snapshot_task` / `truenas_update_snapshot_task` — automatic snapshot schedules
+- `truenas_create_scrub_task` / `truenas_update_scrub_task` — scheduled scrubs
 
 ## Write support & safety
 
