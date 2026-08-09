@@ -15,7 +15,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { TrueNasClient, TrueNasConfig } from "./truenas-client.js";
+import { TrueNasClient, TrueNasConfig, TrueNasError } from "./truenas-client.js";
 
 interface ToolContext {
   config: TrueNasConfig;
@@ -32,6 +32,11 @@ const CHARACTER_LIMIT = 25_000;
 // Closed domain: these tools query one known, owner-controlled NAS, not an
 // open world of external entities — so openWorldHint is false.
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
+
+// Safe (reversible) writes. NEVER set readOnlyHint on a mutating tool — clients
+// like Claude Code auto-approve read-only tools, which would let a write run
+// unprompted. destructiveHint stays false because these are reversible.
+const SAFE_WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 
 const responseFormat = z
   .enum(["markdown", "json"])
@@ -90,6 +95,37 @@ function respond(
 function errorResult(error: unknown): ToolResult {
   const message = error instanceof Error ? error.message : String(error);
   return { isError: true, content: [{ type: "text", text: `Error: ${message}` }] };
+}
+
+/**
+ * Append a structured audit line for a mutating tool call. Goes to stderr —
+ * stdout carries the MCP protocol and must never be written to here.
+ */
+function auditLog(entry: { tool: string; method: string; target?: string; outcome: string }): void {
+  const parts = [
+    `[audit] ${new Date().toISOString()}`,
+    `tool=${entry.tool}`,
+    `method=${entry.method}`,
+    entry.target ? `target=${entry.target}` : "",
+    `outcome=${entry.outcome}`,
+  ].filter(Boolean);
+  console.error(parts.join(" "));
+}
+
+/**
+ * Test-safety guard: when TRUENAS_TEST_DATASET is set, refuse any write whose
+ * target is outside that dataset (or its children). Lets you point the server
+ * at a disposable dataset during development so a mistake can't hit real data.
+ */
+function assertAllowedTarget(config: TrueNasConfig, target: string): void {
+  const allowed = config.testDataset;
+  if (!allowed) return;
+  const dataset = target.split("@")[0]; // strip any snapshot suffix
+  if (dataset === allowed || dataset.startsWith(allowed + "/")) return;
+  throw new TrueNasError(
+    `Refusing to write to '${target}': TRUENAS_TEST_DATASET='${allowed}' restricts writes to that dataset ` +
+      `and its children (test-safety guard). Unset TRUENAS_TEST_DATASET for normal use.`
+  );
 }
 
 function humanBytes(n: unknown): string {
@@ -1694,4 +1730,149 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }
     }
   );
+
+  // ================================================================
+  // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
+  // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
+  // stderr, and when TRUENAS_TEST_DATASET is set, restricted to that dataset.
+  // ================================================================
+  if (config.enableWrite) {
+    // ---------------- create snapshot ----------------
+    server.registerTool(
+      "truenas_create_snapshot",
+      {
+        title: "Create ZFS Snapshot",
+        description:
+          "Create a ZFS snapshot of a dataset (optionally recursive). A safe, reversible write — the snapshot " +
+          "can be listed and later deleted. Ideal for 'take a snapshot before I change X'. Only available when " +
+          "the server was started with TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Dataset to snapshot, e.g. 'tank/appdata'"),
+          name: z.string().describe("Snapshot name — the part after '@', e.g. 'manual-2026-08-08'"),
+          recursive: z.boolean().default(false).describe("Also snapshot child datasets"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({
+          created: z.boolean(),
+          snapshot: z.string(),
+          dataset: z.string(),
+          name: z.string(),
+          recursive: z.boolean(),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, name, recursive, response_format }): Promise<ToolResult> => {
+        const snapId = `${dataset}@${name}`;
+        try {
+          assertAllowedTarget(config, dataset);
+          const raw = (await getClient().createSnapshot({ dataset, name, recursive })) as {
+            id?: string;
+            name?: string;
+          };
+          const created = raw?.id ?? raw?.name ?? snapId;
+          auditLog({
+            tool: "truenas_create_snapshot",
+            method: "pool.snapshot.create",
+            target: created,
+            outcome: "success",
+          });
+          const structured = { created: true, snapshot: created, dataset, name, recursive };
+          return respond(
+            structured,
+            response_format,
+            () => `Created snapshot **${created}**${recursive ? " (recursive)" : ""}.`
+          );
+        } catch (error) {
+          auditLog({
+            tool: "truenas_create_snapshot",
+            method: "pool.snapshot.create",
+            target: snapId,
+            outcome: `error: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update dataset properties ----------------
+    server.registerTool(
+      "truenas_update_dataset",
+      {
+        title: "Update Dataset Properties",
+        description:
+          "Update properties of an EXISTING ZFS dataset (comment, compression, readonly, atime, sync, or " +
+          "quota). A reversible write: it changes settings only — it does NOT create or delete datasets or " +
+          "modify their data. Supply only the properties you want to change. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Dataset ID / full path, e.g. 'tank/appdata'"),
+          comments: z.string().optional().describe("Free-text comment on the dataset"),
+          compression: z
+            .enum(["INHERIT", "OFF", "LZ4", "ZSTD", "GZIP", "ON"])
+            .optional()
+            .describe("Compression algorithm"),
+          readonly: z.enum(["ON", "OFF", "INHERIT"]).optional().describe("Make the dataset read-only"),
+          atime: z.enum(["ON", "OFF", "INHERIT"]).optional().describe("Update access times on read"),
+          sync: z
+            .enum(["STANDARD", "ALWAYS", "DISABLED", "INHERIT"])
+            .optional()
+            .describe("Synchronous write behavior"),
+          quota_bytes: z
+            .number()
+            .int()
+            .min(0)
+            .optional()
+            .describe("Dataset quota in bytes (0 removes the quota; the minimum non-zero quota is 1 GiB)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({
+          updated: z.boolean(),
+          dataset: z.string(),
+          applied: z.record(z.string(), z.unknown()),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({
+        dataset,
+        comments,
+        compression,
+        readonly,
+        atime,
+        sync,
+        quota_bytes,
+        response_format,
+      }): Promise<ToolResult> => {
+        try {
+          assertAllowedTarget(config, dataset);
+          const data: Record<string, unknown> = {};
+          if (comments !== undefined) data.comments = comments;
+          if (compression !== undefined) data.compression = compression;
+          if (readonly !== undefined) data.readonly = readonly;
+          if (atime !== undefined) data.atime = atime;
+          if (sync !== undefined) data.sync = sync;
+          if (quota_bytes !== undefined) data.quota = quota_bytes;
+          if (Object.keys(data).length === 0) {
+            throw new TrueNasError(
+              "No properties supplied — set at least one of comments/compression/readonly/atime/sync/quota_bytes."
+            );
+          }
+          await getClient().updateDataset(dataset, data);
+          auditLog({ tool: "truenas_update_dataset", method: "pool.dataset.update", target: dataset, outcome: "success" });
+          const structured = { updated: true, dataset, applied: data };
+          return respond(structured, response_format, () =>
+            `Updated **${dataset}**: ${Object.entries(data)
+              .map(([k, v]) => `${k}=${String(v)}`)
+              .join(", ")}.`
+          );
+        } catch (error) {
+          auditLog({
+            tool: "truenas_update_dataset",
+            method: "pool.dataset.update",
+            target: dataset,
+            outcome: `error: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return errorResult(error);
+        }
+      }
+    );
+  }
 }

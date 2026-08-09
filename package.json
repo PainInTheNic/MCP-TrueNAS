@@ -18,6 +18,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "test": "tsx --test \"test/**/*.test.ts\"",
     "prepare": "npm run build"
   },
   "keywords": [

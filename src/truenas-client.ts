@@ -29,6 +29,12 @@ export interface TrueNasConfig {
   username?: string;
   skipTlsVerify: boolean;
   allowHttp: boolean;
+  /** Register safe (reversible) write tools. Off unless TRUENAS_ENABLE_WRITE=1. */
+  enableWrite: boolean;
+  /** Register destructive tools (delete/rollback/reboot/...). Off unless TRUENAS_ENABLE_DESTRUCTIVE=1. */
+  enableDestructive: boolean;
+  /** Test-safety guard: when set, write tools refuse any target outside this dataset and its children. */
+  testDataset?: string;
 }
 
 export type ApiMode = "websocket" | "rest";
@@ -747,6 +753,35 @@ export class TrueNasClient {
 
   async vms(): Promise<unknown[]> {
     return this.wsOnly("virtual machine", async () => (normalizeDates(await this.call("vm.query", [[], {}])) as unknown[]) ?? []);
+  }
+
+  // ------------------------------------------------------------------
+  // Mutations (safe writes). WebSocket-only; gated at the tool layer by
+  // TRUENAS_ENABLE_WRITE. Each returns the raw upstream result.
+  // ------------------------------------------------------------------
+
+  /** Create a ZFS snapshot (pool.snapshot.create). Returns the new snapshot info. */
+  async createSnapshot(opts: {
+    dataset: string;
+    name: string;
+    recursive?: boolean;
+    properties?: Record<string, unknown>;
+  }): Promise<unknown> {
+    return this.wsOnly("snapshot creation", async () =>
+      this.call("pool.snapshot.create", [
+        {
+          dataset: opts.dataset,
+          name: opts.name,
+          recursive: opts.recursive ?? false,
+          ...(opts.properties && Object.keys(opts.properties).length ? { properties: opts.properties } : {}),
+        },
+      ])
+    );
+  }
+
+  /** Update ZFS dataset properties (pool.dataset.update). Returns the updated dataset. */
+  async updateDataset(id: string, data: Record<string, unknown>): Promise<unknown> {
+    return this.wsOnly("dataset update", async () => this.call("pool.dataset.update", [id, data]));
   }
 
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */

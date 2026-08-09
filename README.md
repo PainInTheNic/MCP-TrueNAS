@@ -4,7 +4,10 @@ An MCP (Model Context Protocol) server that lets Claude monitor and manage a
 TrueNAS box in plain English: *"any alerts on the NAS?"*, *"how full is tank?"*,
 *"list snapshots of appdata"*.
 
-Version 1 is **deliberately read-only** — every tool observes, nothing mutates.
+**Read-only by default** — the server observes and never mutates unless you opt
+in. Safe, reversible writes are enabled with `TRUENAS_ENABLE_WRITE=1`;
+destructive operations are separately gated and human-confirmed. See
+[Write support & safety](#write-support--safety).
 
 ## How it works
 
@@ -79,6 +82,36 @@ the structured result is machine-validated by the MCP client.
 - `truenas_list_snapshot_tasks` — periodic (automatic) snapshot policy and retention
 - `truenas_list_scrub_tasks` — scheduled pool scrub tasks
 - `truenas_list_vms` — virtual machines, run state, and resource allocation
+
+**Writes (opt-in — set `TRUENAS_ENABLE_WRITE=1`)** — reversible, non-destructive; never marked read-only (so a client won't auto-run them); every call is audit-logged to stderr:
+- `truenas_create_snapshot` — take a ZFS snapshot of a dataset (optionally recursive)
+- `truenas_update_dataset` — change dataset properties (comment, compression, readonly, atime, sync, quota)
+
+## Write support & safety
+
+The server is **read-only until you opt in**, in tiers:
+
+| Tier | Enable with | Gate |
+|---|---|---|
+| **Read** (default) | always on | none |
+| **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
+| **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
+
+> **Status:** safe writes ship now (`truenas_create_snapshot`, `truenas_update_dataset`). The destructive tier's flag and gating design exist, but **no destructive tool is registered yet** — those land in a later phase.
+
+Being honest about enforcement: MCP has **no protocol-level way to force** human
+confirmation, so the guarantees that actually hold are the ones a client cannot
+bypass — destructive tools are **absent from the tool list** unless the operator
+sets the flag, and they **refuse to run** when a human can't be prompted.
+Elicitation prompts and Claude Code `ask`/`deny` permission rules add
+defense-in-depth but are bypassable (`--dangerously-skip-permissions`,
+auto-accepting clients). The most dangerous operations — `disk.wipe`,
+`pool.create` (formats disks), `pool.export` with destroy — are deliberately
+**not implemented**; do those in the TrueNAS UI.
+
+**Testing writes safely:** set `TRUENAS_TEST_DATASET=tank/mcp-test` to restrict
+*every* write to that dataset and its children, so a mistake can't reach real
+data — or point the server at a throwaway TrueNAS VM for write development.
 
 ## Setup
 

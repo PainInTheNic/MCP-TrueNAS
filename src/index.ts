@@ -37,6 +37,9 @@ const config: TrueNasConfig = {
   username: process.env.TRUENAS_USERNAME || undefined,
   skipTlsVerify: process.env.TRUENAS_SKIP_TLS_VERIFY === "1",
   allowHttp: process.env.TRUENAS_ALLOW_HTTP === "1",
+  enableWrite: process.env.TRUENAS_ENABLE_WRITE === "1",
+  enableDestructive: process.env.TRUENAS_ENABLE_DESTRUCTIVE === "1",
+  testDataset: process.env.TRUENAS_TEST_DATASET || undefined,
 };
 
 // The client is created lazily so the server always starts and lists its
