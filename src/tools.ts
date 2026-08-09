@@ -1874,5 +1874,217 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ---------------- control a service ----------------
+    server.registerTool(
+      "truenas_control_service",
+      {
+        title: "Start / Stop / Restart a Service",
+        description:
+          "Start, stop, restart, or reload a TrueNAS service (e.g. smb, nfs, ssh, iscsitarget). STOP interrupts " +
+          "availability for anything using that service, but is reversible — start it again. Runs as a job; the " +
+          "result reports the final state. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          service: z.string().describe("Service name, e.g. 'smb', 'nfs', 'ssh', 'iscsitarget'"),
+          action: z.enum(["START", "STOP", "RESTART", "RELOAD"]).describe("What to do to the service"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({
+          service: z.string(),
+          action: z.string(),
+          job_id: z.number().nullable(),
+          state: z.string(),
+          error: z.string().nullable(),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ service, action, response_format }): Promise<ToolResult> => {
+        try {
+          const out = await getClient().controlService(action, service);
+          auditLog({
+            tool: "truenas_control_service",
+            method: "service.control",
+            target: `${action} ${service}`,
+            outcome: out.error ? `error: ${out.error}` : out.state,
+          });
+          const structured = { service, action, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error
+              ? `Service **${service}** ${action} failed: ${out.error}`
+              : `Service **${service}**: ${action} → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_control_service", method: "service.control", target: `${action} ${service}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- service start-on-boot ----------------
+    server.registerTool(
+      "truenas_set_service_boot",
+      {
+        title: "Set Service Start-on-Boot",
+        description:
+          "Enable or disable whether a service starts automatically at boot. This does NOT start or stop it now " +
+          "(use truenas_control_service for that). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          service: z.string().describe("Service name, e.g. 'smb'"),
+          start_on_boot: z.boolean().describe("Whether the service should start on boot"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ service: z.string(), start_on_boot: z.boolean() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ service, start_on_boot, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().setServiceBoot(service, start_on_boot);
+          auditLog({ tool: "truenas_set_service_boot", method: "service.update", target: service, outcome: "success" });
+          const structured = { service, start_on_boot };
+          return respond(
+            structured,
+            response_format,
+            () => `Service **${service}** start-on-boot **${start_on_boot ? "enabled" : "disabled"}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_set_service_boot", method: "service.update", target: service, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- app lifecycle ----------------
+    server.registerTool(
+      "truenas_manage_app",
+      {
+        title: "Manage an App (start/stop/redeploy/upgrade/rollback)",
+        description:
+          "Control an installed app's lifecycle. 'stop' interrupts the app (reversible with 'start'); 'redeploy' " +
+          "pulls latest images and restarts; 'upgrade' moves to a newer catalog version; 'rollback' returns to a " +
+          "prior version (requires app_version). Runs as a job. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          app: z.string().describe("App name, e.g. 'prometheus' (see truenas_list_apps)"),
+          action: z
+            .enum(["start", "stop", "redeploy", "upgrade", "rollback"])
+            .describe("Lifecycle action to perform"),
+          app_version: z
+            .string()
+            .optional()
+            .describe("Target version — REQUIRED for rollback; optional for upgrade (defaults to latest)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({
+          app: z.string(),
+          action: z.string(),
+          job_id: z.number().nullable(),
+          state: z.string(),
+          error: z.string().nullable(),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ app, action, app_version, response_format }): Promise<ToolResult> => {
+        try {
+          if (action === "rollback" && !app_version) {
+            throw new TrueNasError("Rollback requires app_version — the target version to roll back to.");
+          }
+          const out = await getClient().appAction(action, app, app_version);
+          auditLog({
+            tool: "truenas_manage_app",
+            method: `app.${action}`,
+            target: app,
+            outcome: out.error ? `error: ${out.error}` : out.state,
+          });
+          const structured = { app, action, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error
+              ? `App **${app}** ${action} failed: ${out.error}`
+              : `App **${app}**: ${action} → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_manage_app", method: `app.${action}`, target: app, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- vm lifecycle ----------------
+    server.registerTool(
+      "truenas_manage_vm",
+      {
+        title: "Manage a VM (start/stop/restart/suspend/resume)",
+        description:
+          "Control a virtual machine's run state by id. 'stop' asks the guest to shut down gracefully (reversible " +
+          "with 'start'); 'restart' reboots it; 'suspend'/'resume' pause and continue it. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("VM id (see truenas_list_vms)"),
+          action: z.enum(["start", "stop", "restart", "suspend", "resume"]).describe("Lifecycle action"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({
+          id: z.number(),
+          action: z.string(),
+          job_id: z.number().nullable(),
+          state: z.string(),
+          error: z.string().nullable(),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, action, response_format }): Promise<ToolResult> => {
+        try {
+          const out = await getClient().vmAction(action, id);
+          auditLog({
+            tool: "truenas_manage_vm",
+            method: `vm.${action}`,
+            target: `vm:${id}`,
+            outcome: out.error ? `error: ${out.error}` : out.state,
+          });
+          const structured = { id, action, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error
+              ? `VM ${id} ${action} failed: ${out.error}`
+              : `VM **${id}**: ${action} → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_manage_vm", method: `vm.${action}`, target: `vm:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- run a scrub ----------------
+    server.registerTool(
+      "truenas_run_scrub",
+      {
+        title: "Run a Pool Scrub",
+        description:
+          "Start a manual ZFS scrub on a pool (a read-only integrity check of stored data — safe, and it can be " +
+          "left to run). Optionally only start if the last scrub was more than threshold_days ago. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          pool: z.string().describe("Pool name, e.g. 'tank'"),
+          threshold_days: z
+            .number()
+            .int()
+            .min(0)
+            .optional()
+            .describe("Only start if the last scrub was more than this many days ago (default 35)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ started: z.boolean(), pool: z.string(), threshold_days: z.number().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ pool, threshold_days, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().runScrub(pool, threshold_days);
+          auditLog({ tool: "truenas_run_scrub", method: "pool.scrub.run", target: pool, outcome: "success" });
+          const structured = { started: true, pool, threshold_days: threshold_days ?? null };
+          return respond(structured, response_format, () => `Started a scrub on pool **${pool}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_run_scrub", method: "pool.scrub.run", target: pool, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 }

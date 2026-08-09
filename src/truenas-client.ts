@@ -50,6 +50,16 @@ export interface Detection {
 /** An error whose message is already safe and actionable to show to the model. */
 export class TrueNasError extends Error {}
 
+/** Result of a possibly-async (job) mutation. */
+export interface JobOutcome {
+  /** Job id when the method ran as a job, else null. */
+  jobId: number | null;
+  /** WAITING | RUNNING | SUCCESS | FAILED | ABORTED (RUNNING if the wait timed out). */
+  state: string;
+  error: string | null;
+  result: unknown;
+}
+
 class JsonRpcError extends Error {
   constructor(
     readonly code: number,
@@ -782,6 +792,87 @@ export class TrueNasClient {
   /** Update ZFS dataset properties (pool.dataset.update). Returns the updated dataset. */
   async updateDataset(id: string, data: Record<string, unknown>): Promise<unknown> {
     return this.wsOnly("dataset update", async () => this.call("pool.dataset.update", [id, data]));
+  }
+
+  /**
+   * Call a method and, if it runs as a TrueNAS job (the JSON-RPC call returns a
+   * numeric job id), best-effort wait for it to finish by polling core.get_jobs.
+   * Non-job methods (which return their actual result, not a number) resolve
+   * immediately. On wait timeout the job keeps running — we return its last
+   * state and id so the caller can point the user at truenas_list_jobs.
+   *
+   * IMPORTANT: only route genuine @job methods here. A non-job method that
+   * returns an integer (e.g. service.update returns the service id) would be
+   * mistaken for a job id — call those directly instead.
+   */
+  async callJob(method: string, params: unknown[], waitMs = 20_000): Promise<JobOutcome> {
+    const submitted = await this.call(method, params);
+    if (typeof submitted !== "number") {
+      return { jobId: null, state: "SUCCESS", error: null, result: submitted };
+    }
+    const jobId = submitted;
+    const deadline = Date.now() + waitMs;
+    let state = "RUNNING";
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      let jobs: Array<{ state?: string; error?: string | null; result?: unknown }>;
+      try {
+        jobs = (await this.call("core.get_jobs", [[["id", "=", jobId]], { limit: 1 }])) as typeof jobs;
+      } catch {
+        break; // Polling failed; report the job as still running.
+      }
+      const job = jobs?.[0];
+      if (job?.state) state = job.state;
+      if (job && (job.state === "SUCCESS" || job.state === "FAILED" || job.state === "ABORTED")) {
+        return { jobId, state: job.state, error: job.error ?? null, result: job.result ?? null };
+      }
+    }
+    return { jobId, state, error: null, result: null };
+  }
+
+  /** service.control — START/STOP/RESTART/RELOAD a service by name (runs as a job). */
+  async controlService(action: "START" | "STOP" | "RESTART" | "RELOAD", service: string): Promise<JobOutcome> {
+    return this.wsOnly("service control", () => this.callJob("service.control", [action, service, {}]));
+  }
+
+  /** service.update — set whether a service starts on boot (synchronous; returns the service id). */
+  async setServiceBoot(service: string, enable: boolean): Promise<unknown> {
+    return this.wsOnly("service update", () => this.call("service.update", [service, { enable }]));
+  }
+
+  /** app.start/stop/redeploy/upgrade/rollback — lifecycle actions on an installed app (all jobs). */
+  async appAction(
+    action: "start" | "stop" | "redeploy" | "upgrade" | "rollback",
+    appName: string,
+    appVersion?: string
+  ): Promise<JobOutcome> {
+    return this.wsOnly("app action", () => {
+      if (action === "upgrade") {
+        return this.callJob("app.upgrade", [appName, { app_version: appVersion ?? "latest" }]);
+      }
+      if (action === "rollback") {
+        return this.callJob("app.rollback", [appName, { app_version: appVersion }]);
+      }
+      return this.callJob(`app.${action}`, [appName]);
+    });
+  }
+
+  /** vm.start/stop/restart/suspend/resume — lifecycle actions on a VM by id. */
+  async vmAction(
+    action: "start" | "stop" | "restart" | "suspend" | "resume",
+    id: number
+  ): Promise<JobOutcome> {
+    return this.wsOnly("vm action", () => this.callJob(`vm.${action}`, [id]));
+  }
+
+  /**
+   * pool.scrub.run — start a manual scrub on a pool by name (synchronous).
+   * Note: deprecated in TrueNAS 26 in favor of zpool.scrub.run; still valid on 25.10.
+   */
+  async runScrub(pool: string, threshold?: number): Promise<unknown> {
+    return this.wsOnly("scrub run", () =>
+      this.call("pool.scrub.run", threshold !== undefined ? [pool, threshold] : [pool])
+    );
   }
 
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */

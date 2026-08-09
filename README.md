@@ -86,6 +86,11 @@ the structured result is machine-validated by the MCP client.
 **Writes (opt-in — set `TRUENAS_ENABLE_WRITE=1`)** — reversible, non-destructive; never marked read-only (so a client won't auto-run them); every call is audit-logged to stderr:
 - `truenas_create_snapshot` — take a ZFS snapshot of a dataset (optionally recursive)
 - `truenas_update_dataset` — change dataset properties (comment, compression, readonly, atime, sync, quota)
+- `truenas_control_service` — start / stop / restart / reload a service (smb, nfs, ssh, …)
+- `truenas_set_service_boot` — enable/disable a service starting on boot
+- `truenas_manage_app` — start / stop / redeploy / upgrade / rollback an installed app
+- `truenas_manage_vm` — start / stop / restart / suspend / resume a VM
+- `truenas_run_scrub` — start a manual pool scrub
 
 ## Write support & safety
 

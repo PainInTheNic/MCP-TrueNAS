@@ -68,3 +68,56 @@ test("updateDataset sends pool.dataset.update with [id, data]", async () => {
   assert.equal(calls[0].method, "pool.dataset.update");
   assert.deepEqual(calls[0].params, ["tank/data", { comments: "hi", readonly: "ON" }]);
 });
+
+// --- Phase 2: reactive lifecycle ---
+
+test("controlService sends service.control with [verb, name, {}]", async () => {
+  const { client, calls } = stubClient();
+  await client.controlService("STOP", "smb");
+  assert.equal(calls[0].method, "service.control");
+  assert.deepEqual(calls[0].params, ["STOP", "smb", {}]);
+});
+
+test("setServiceBoot sends service.update with [name, {enable}]", async () => {
+  const { client, calls } = stubClient();
+  await client.setServiceBoot("smb", true);
+  assert.equal(calls[0].method, "service.update");
+  assert.deepEqual(calls[0].params, ["smb", { enable: true }]);
+});
+
+test("appAction start/stop map to app.<action> with [app_name]", async () => {
+  const { client, calls } = stubClient();
+  await client.appAction("stop", "prometheus");
+  assert.equal(calls[0].method, "app.stop");
+  assert.deepEqual(calls[0].params, ["prometheus"]);
+});
+
+test("appAction upgrade sends app.upgrade with default app_version=latest", async () => {
+  const { client, calls } = stubClient();
+  await client.appAction("upgrade", "prometheus");
+  assert.equal(calls[0].method, "app.upgrade");
+  assert.deepEqual(calls[0].params, ["prometheus", { app_version: "latest" }]);
+});
+
+test("appAction rollback sends app.rollback with the given app_version", async () => {
+  const { client, calls } = stubClient();
+  await client.appAction("rollback", "prometheus", "1.4.13");
+  assert.equal(calls[0].method, "app.rollback");
+  assert.deepEqual(calls[0].params, ["prometheus", { app_version: "1.4.13" }]);
+});
+
+test("vmAction maps to vm.<action> with [id]", async () => {
+  const { client, calls } = stubClient();
+  await client.vmAction("restart", 3);
+  assert.equal(calls[0].method, "vm.restart");
+  assert.deepEqual(calls[0].params, [3]);
+});
+
+test("runScrub sends pool.scrub.run with [pool] or [pool, threshold]", async () => {
+  const a = stubClient();
+  await a.client.runScrub("tank");
+  assert.deepEqual(a.calls[0].params, ["tank"]);
+  const b = stubClient();
+  await b.client.runScrub("tank", 7);
+  assert.deepEqual(b.calls[0].params, ["tank", 7]);
+});
