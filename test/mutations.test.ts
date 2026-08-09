@@ -121,3 +121,39 @@ test("runScrub sends pool.scrub.run with [pool] or [pool, threshold]", async () 
   await b.client.runScrub("tank", 7);
   assert.deepEqual(b.calls[0].params, ["tank", 7]);
 });
+
+// --- Phase 3: provisioning (storage + sharing) ---
+
+test("createDataset defaults type=FILESYSTEM and includes only provided optionals", async () => {
+  const { client, calls } = stubClient();
+  await client.createDataset({ name: "tank/appdata", comments: "app data" });
+  assert.equal(calls[0].method, "pool.dataset.create");
+  assert.deepEqual(calls[0].params, [{ name: "tank/appdata", type: "FILESYSTEM", comments: "app data" }]);
+});
+
+test("createDataset for a zvol includes volsize", async () => {
+  const { client, calls } = stubClient();
+  await client.createDataset({ name: "tank/vol", type: "VOLUME", volsize: 1073741824 });
+  assert.deepEqual(calls[0].params, [{ name: "tank/vol", type: "VOLUME", volsize: 1073741824 }]);
+});
+
+test("renameDataset sends pool.dataset.rename with [id, {new_name}]", async () => {
+  const { client, calls } = stubClient();
+  await client.renameDataset("tank/old", "tank/new", true);
+  assert.equal(calls[0].method, "pool.dataset.rename");
+  assert.deepEqual(calls[0].params, ["tank/old", { new_name: "tank/new", recursive: true }]);
+});
+
+test("createSmbShare sends sharing.smb.create with path+name and provided optionals", async () => {
+  const { client, calls } = stubClient();
+  await client.createSmbShare({ path: "/mnt/tank/media", name: "media", readonly: true });
+  assert.equal(calls[0].method, "sharing.smb.create");
+  assert.deepEqual(calls[0].params, [{ path: "/mnt/tank/media", name: "media", readonly: true }]);
+});
+
+test("createNfsShare maps readonly to ro and includes networks", async () => {
+  const { client, calls } = stubClient();
+  await client.createNfsShare({ path: "/mnt/tank/backups", ro: true, networks: ["192.168.0.0/24"] });
+  assert.equal(calls[0].method, "sharing.nfs.create");
+  assert.deepEqual(calls[0].params, [{ path: "/mnt/tank/backups", networks: ["192.168.0.0/24"], ro: true }]);
+});

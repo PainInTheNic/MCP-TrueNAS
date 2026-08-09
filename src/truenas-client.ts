@@ -875,6 +875,81 @@ export class TrueNasClient {
     );
   }
 
+  // ------------------------------------------------------------------
+  // Provisioning (create/update). All WebSocket-only and synchronous. The
+  // typed option objects are assembled into the API payload HERE (not in the
+  // tool handlers) so the exact params are unit-testable.
+  // ------------------------------------------------------------------
+
+  private provision(method: string, params: unknown[]): Promise<unknown> {
+    return this.wsOnly(method, () => this.call(method, params));
+  }
+
+  async createDataset(opts: {
+    name: string;
+    type?: "FILESYSTEM" | "VOLUME";
+    volsize?: number;
+    comments?: string;
+    compression?: string;
+    create_ancestors?: boolean;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { name: opts.name, type: opts.type ?? "FILESYSTEM" };
+    if (opts.volsize !== undefined) data.volsize = opts.volsize;
+    if (opts.comments !== undefined) data.comments = opts.comments;
+    if (opts.compression !== undefined) data.compression = opts.compression;
+    if (opts.create_ancestors !== undefined) data.create_ancestors = opts.create_ancestors;
+    return this.provision("pool.dataset.create", [data]);
+  }
+
+  async renameDataset(id: string, newName: string, recursive?: boolean): Promise<unknown> {
+    const data: Record<string, unknown> = { new_name: newName };
+    if (recursive !== undefined) data.recursive = recursive;
+    return this.provision("pool.dataset.rename", [id, data]);
+  }
+
+  async createSmbShare(opts: {
+    path: string;
+    name: string;
+    comment?: string;
+    enabled?: boolean;
+    readonly?: boolean;
+    browsable?: boolean;
+    purpose?: string;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { path: opts.path, name: opts.name };
+    if (opts.comment !== undefined) data.comment = opts.comment;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    if (opts.readonly !== undefined) data.readonly = opts.readonly;
+    if (opts.browsable !== undefined) data.browsable = opts.browsable;
+    if (opts.purpose !== undefined) data.purpose = opts.purpose;
+    return this.provision("sharing.smb.create", [data]);
+  }
+
+  async updateSmbShare(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("sharing.smb.update", [id, data]);
+  }
+
+  async createNfsShare(opts: {
+    path: string;
+    comment?: string;
+    networks?: string[];
+    hosts?: string[];
+    ro?: boolean;
+    enabled?: boolean;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { path: opts.path };
+    if (opts.comment !== undefined) data.comment = opts.comment;
+    if (opts.networks !== undefined) data.networks = opts.networks;
+    if (opts.hosts !== undefined) data.hosts = opts.hosts;
+    if (opts.ro !== undefined) data.ro = opts.ro;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    return this.provision("sharing.nfs.create", [data]);
+  }
+
+  async updateNfsShare(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("sharing.nfs.update", [id, data]);
+  }
+
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */
   close(): void {
     this.failAllPending(new TrueNasError("The client is shutting down."));

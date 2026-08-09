@@ -2086,5 +2086,215 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ---------------- create dataset ----------------
+    server.registerTool(
+      "truenas_create_dataset",
+      {
+        title: "Create Dataset",
+        description:
+          "Create a new ZFS dataset (a filesystem) or zvol (a block volume). Reversible — the dataset can be " +
+          "deleted later. For a zvol, set type=VOLUME and volsize_bytes. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          name: z.string().describe("Full dataset path to create, e.g. 'tank/appdata'"),
+          type: z.enum(["FILESYSTEM", "VOLUME"]).default("FILESYSTEM").describe("FILESYSTEM (dataset) or VOLUME (zvol)"),
+          volsize_bytes: z.number().int().min(1).optional().describe("Required for VOLUME: the zvol size in bytes"),
+          comments: z.string().optional().describe("Free-text comment"),
+          compression: z.enum(["INHERIT", "OFF", "LZ4", "ZSTD", "GZIP", "ON"]).optional().describe("Compression"),
+          create_ancestors: z.boolean().default(false).describe("Create parent datasets if they don't exist"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), dataset: z.string(), type: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ name, type, volsize_bytes, comments, compression, create_ancestors, response_format }): Promise<ToolResult> => {
+        try {
+          assertAllowedTarget(config, name);
+          if (type === "VOLUME" && volsize_bytes === undefined) {
+            throw new TrueNasError("A VOLUME (zvol) requires volsize_bytes.");
+          }
+          await getClient().createDataset({ name, type, volsize: volsize_bytes, comments, compression, create_ancestors });
+          auditLog({ tool: "truenas_create_dataset", method: "pool.dataset.create", target: name, outcome: "success" });
+          return respond({ created: true, dataset: name, type }, response_format, () => `Created ${type === "VOLUME" ? "zvol" : "dataset"} **${name}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_dataset", method: "pool.dataset.create", target: name, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- rename dataset ----------------
+    server.registerTool(
+      "truenas_rename_dataset",
+      {
+        title: "Rename Dataset",
+        description:
+          "Rename a ZFS dataset. ⚠ ZFS performs NO safety checks: renaming a dataset that backs an active SMB/" +
+          "NFS/iSCSI share, snapshot task, or replication can disrupt it. Reversible (rename back). Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Current dataset path, e.g. 'tank/old'"),
+          new_name: z.string().describe("New full dataset path, e.g. 'tank/new'"),
+          recursive: z.boolean().default(false).describe("Recursively rename child datasets"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ renamed: z.boolean(), dataset: z.string(), new_name: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, new_name, recursive, response_format }): Promise<ToolResult> => {
+        try {
+          assertAllowedTarget(config, dataset);
+          assertAllowedTarget(config, new_name);
+          await getClient().renameDataset(dataset, new_name, recursive);
+          auditLog({ tool: "truenas_rename_dataset", method: "pool.dataset.rename", target: `${dataset} -> ${new_name}`, outcome: "success" });
+          return respond({ renamed: true, dataset, new_name }, response_format, () => `Renamed **${dataset}** → **${new_name}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_rename_dataset", method: "pool.dataset.rename", target: `${dataset} -> ${new_name}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create SMB share ----------------
+    server.registerTool(
+      "truenas_create_smb_share",
+      {
+        title: "Create SMB Share",
+        description:
+          "Create an SMB (Windows/macOS file) share for a path under /mnt. Reversible — the share can be deleted. " +
+          "This shares an existing dataset; it does not create the dataset. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          path: z.string().describe("Path to share, e.g. '/mnt/tank/media'"),
+          name: z.string().max(80).describe("Share name (what clients see), e.g. 'media'"),
+          comment: z.string().optional().describe("Description"),
+          enabled: z.boolean().default(true).describe("Enable the share now"),
+          readonly: z.boolean().default(false).describe("Export read-only"),
+          browsable: z.boolean().default(true).describe("Show in network browse lists"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), name: z.string(), path: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ path, name, comment, enabled, readonly, browsable, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().createSmbShare({ path, name, comment, enabled, readonly, browsable });
+          auditLog({ tool: "truenas_create_smb_share", method: "sharing.smb.create", target: `${name} (${path})`, outcome: "success" });
+          return respond({ created: true, name, path }, response_format, () => `Created SMB share **${name}** → ${path}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_smb_share", method: "sharing.smb.create", target: `${name} (${path})`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update SMB share ----------------
+    server.registerTool(
+      "truenas_update_smb_share",
+      {
+        title: "Update SMB Share",
+        description:
+          "Update an existing SMB share by id (see truenas_list_shares). Supply only the fields to change. " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("SMB share id"),
+          enabled: z.boolean().optional(),
+          readonly: z.boolean().optional(),
+          browsable: z.boolean().optional(),
+          comment: z.string().optional(),
+          name: z.string().max(80).optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, enabled, readonly, browsable, comment, name, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (enabled !== undefined) data.enabled = enabled;
+          if (readonly !== undefined) data.readonly = readonly;
+          if (browsable !== undefined) data.browsable = browsable;
+          if (comment !== undefined) data.comment = comment;
+          if (name !== undefined) data.name = name;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateSmbShare(id, data);
+          auditLog({ tool: "truenas_update_smb_share", method: "sharing.smb.update", target: `smb:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated SMB share ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_smb_share", method: "sharing.smb.update", target: `smb:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create NFS share ----------------
+    server.registerTool(
+      "truenas_create_nfs_share",
+      {
+        title: "Create NFS Share",
+        description:
+          "Create an NFS export for a path under /mnt, optionally limited to networks/hosts. Reversible. Shares " +
+          "an existing dataset; does not create it. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          path: z.string().describe("Path to export, e.g. '/mnt/tank/backups'"),
+          comment: z.string().optional(),
+          networks: z.array(z.string()).optional().describe("Allowed CIDRs, e.g. ['192.168.0.0/24']"),
+          hosts: z.array(z.string()).optional().describe("Allowed hosts/IPs"),
+          readonly: z.boolean().default(false).describe("Export read-only (maps to 'ro')"),
+          enabled: z.boolean().default(true),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), path: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ path, comment, networks, hosts, readonly, enabled, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().createNfsShare({ path, comment, networks, hosts, ro: readonly, enabled });
+          auditLog({ tool: "truenas_create_nfs_share", method: "sharing.nfs.create", target: path, outcome: "success" });
+          return respond({ created: true, path }, response_format, () => `Created NFS export → ${path}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_nfs_share", method: "sharing.nfs.create", target: path, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update NFS share ----------------
+    server.registerTool(
+      "truenas_update_nfs_share",
+      {
+        title: "Update NFS Share",
+        description:
+          "Update an existing NFS export by id (see truenas_list_shares). Supply only the fields to change. " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("NFS share id"),
+          enabled: z.boolean().optional(),
+          readonly: z.boolean().optional().describe("maps to 'ro'"),
+          comment: z.string().optional(),
+          networks: z.array(z.string()).optional(),
+          hosts: z.array(z.string()).optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, enabled, readonly, comment, networks, hosts, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (enabled !== undefined) data.enabled = enabled;
+          if (readonly !== undefined) data.ro = readonly;
+          if (comment !== undefined) data.comment = comment;
+          if (networks !== undefined) data.networks = networks;
+          if (hosts !== undefined) data.hosts = hosts;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateNfsShare(id, data);
+          auditLog({ tool: "truenas_update_nfs_share", method: "sharing.nfs.update", target: `nfs:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format, () => `Updated NFS export ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_nfs_share", method: "sharing.nfs.update", target: `nfs:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 }
