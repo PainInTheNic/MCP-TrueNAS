@@ -104,6 +104,8 @@ the structured result is machine-validated by the MCP client.
 - `truenas_get_notification_config` — email settings, alert services, and alert-class levels (mail password/OAuth stripped)
 
 **Identity, hardware & filesystem (read)**
+- `truenas_list_users` — local/directory users: uid, shell, groups, sudo/lock/2FA, API-key count (password hashes never shown)
+- `truenas_list_groups` — groups: gid, members, sudo/SMB flags, builtin status, RBAC roles
 - `truenas_list_certificates` — TLS certificates with validity dates (bodies & keys never shown)
 - `truenas_list_api_keys` — programmatic API keys, linked user, expiry (key hash never shown)
 - `truenas_list_sessions` — who this server authenticates as, plus all active API/UI sessions
@@ -138,6 +140,8 @@ the structured result is machine-validated by the MCP client.
 - **NVMe-oF:** `truenas_create_nvme_subsystem` / `_namespace` / `_port` / `_port_subsys` / `_host` — build a full NVMe-over-Fabrics target
 - `truenas_create_user` / `truenas_update_user` / `truenas_set_user_password` — local users (passwords never logged)
 - `truenas_create_group` / `truenas_update_group` — local groups
+- `truenas_create_api_key` / `truenas_update_api_key` — create/rename/reset/revoke API keys (key shown once, never logged)
+- `truenas_create_certificate` — import a cert (+ private key) or generate a CSR (private key never logged)
 - `truenas_create_snapshot_task` / `truenas_update_snapshot_task` — automatic snapshot schedules
 - `truenas_create_scrub_task` / `truenas_update_scrub_task` — scheduled scrubs
 
@@ -149,6 +153,7 @@ the structured result is machine-validated by the MCP client.
 - `truenas_delete_nvme` — delete an NVMe-oF subsys/namespace/port/port_subsys/host/host_subsys by id (backing zvol/file kept)
 - `truenas_delete_app` / `truenas_delete_vm` — delete an app / VM (optionally its data too)
 - `truenas_delete_user` / `truenas_delete_group` — delete a user / group
+- `truenas_delete_api_key` / `truenas_delete_certificate` — delete an API key / certificate
 - `truenas_rollback_snapshot` — revert a dataset to a snapshot (discards newer data)
 - `truenas_lock_dataset` — lock an encrypted dataset
 - `truenas_pool_detach_disk` / `truenas_pool_offline_disk` / `truenas_pool_remove_vdev` — pool device operations
@@ -166,7 +171,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **45 read, 48 safe-write, 22 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **47 read, 51 safe-write, 24 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

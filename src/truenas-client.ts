@@ -1421,6 +1421,75 @@ export class TrueNasClient {
     return this.provision(method, [id]);
   }
 
+  // ------------------------------------------------------------------
+  // Identity, access & certificates (Phase 6).
+  // ------------------------------------------------------------------
+
+  /** user.query — password hashes are stripped at the tool layer. */
+  async users(localOnly: boolean): Promise<unknown[]> {
+    const filters = localOnly ? [["local", "=", true]] : [];
+    return this.wsOnly("users", async () => ((await this.call("user.query", [filters, {}])) as unknown[]) ?? []);
+  }
+
+  /** group.query. */
+  async groups(localOnly: boolean): Promise<unknown[]> {
+    const filters = localOnly ? [["local", "=", true]] : [];
+    return this.wsOnly("groups", async () => ((await this.call("group.query", [filters, {}])) as unknown[]) ?? []);
+  }
+
+  /** api_key.create — returns the object INCLUDING the plaintext key (shown once). */
+  async createApiKey(name: string, username: string, expiresAt?: number): Promise<unknown> {
+    const data: Record<string, unknown> = { name, username };
+    if (expiresAt !== undefined) data.expires_at = expiresAt;
+    return this.provision("api_key.create", [data]);
+  }
+
+  /** api_key.update — rename, revoke, or reset (reset returns a new key). */
+  async updateApiKey(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("api_key.update", [id, data]);
+  }
+
+  async deleteApiKey(id: number): Promise<unknown> {
+    return this.provision("api_key.delete", [id]);
+  }
+
+  /** certificate.create — runs as a @job. privatekey/passphrase are passed through and NEVER logged. */
+  async createCertificate(opts: {
+    name: string;
+    create_type: string;
+    certificate?: string;
+    privatekey?: string;
+    passphrase?: string;
+    CSR?: string;
+    key_type?: string;
+    key_length?: number;
+    ec_curve?: string;
+    digest_algorithm?: string;
+    country?: string;
+    state?: string;
+    city?: string;
+    organization?: string;
+    organizational_unit?: string;
+    common?: string;
+    san?: string[];
+    email?: string;
+    add_to_trusted_store?: boolean;
+  }): Promise<JobOutcome> {
+    const data: Record<string, unknown> = { name: opts.name, create_type: opts.create_type };
+    const copy: (keyof typeof opts)[] = [
+      "certificate", "privatekey", "passphrase", "CSR", "key_type", "key_length", "ec_curve",
+      "digest_algorithm", "country", "state", "city", "organization", "organizational_unit",
+      "common", "san", "email", "add_to_trusted_store",
+    ];
+    for (const k of copy) if (opts[k] !== undefined) data[k] = opts[k];
+    return this.wsOnly("certificate create", () => this.callJob("certificate.create", [data]));
+  }
+
+  /** certificate.delete — runs as a @job. */
+  async deleteCertificate(id: number): Promise<JobOutcome> {
+    return this.wsOnly("certificate delete", () => this.callJob("certificate.delete", [id]));
+  }
+
   async createSmbShare(opts: {
     path: string;
     name: string;

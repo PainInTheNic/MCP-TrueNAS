@@ -3297,6 +3297,123 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- users ----------------
+  server.registerTool(
+    "truenas_list_users",
+    {
+      title: "List Users",
+      description:
+        "List local (and optionally directory) user accounts with uid, full name, shell, home, primary group, sudo " +
+        "and lock status, 2FA, and linked API-key count. Password hashes are never included.",
+      inputSchema: z.object({
+        local_only: z.boolean().default(true).describe("Only local accounts (exclude directory-service users)"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        users: z.array(
+          z.object({
+            id: z.number().nullable(),
+            uid: z.number().nullable(),
+            username: z.string().nullable(),
+            full_name: z.string().nullable(),
+            shell: z.string().nullable(),
+            home: z.string().nullable(),
+            locked: z.boolean().nullable(),
+            builtin: z.boolean().nullable(),
+            smb: z.boolean().nullable(),
+            sudo: z.boolean(),
+            twofactor: z.boolean().nullable(),
+            api_keys: z.number(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ local_only, response_format }): Promise<ToolResult> => {
+      try {
+        // user.query returns unixhash/smbhash (password hashes) + password_history — never emitted.
+        const raw = (await getClient().users(local_only)) as Array<Record<string, unknown>>;
+        const users = raw.map((u) => ({
+          id: (u.id as number) ?? null,
+          uid: (u.uid as number) ?? null,
+          username: (u.username as string) ?? null,
+          full_name: (u.full_name as string) ?? null,
+          shell: (u.shell as string) ?? null,
+          home: (u.home as string) ?? null,
+          locked: (u.locked as boolean) ?? null,
+          builtin: (u.builtin as boolean) ?? null,
+          smb: (u.smb as boolean) ?? null,
+          sudo: Array.isArray(u.sudo_commands) && (u.sudo_commands as unknown[]).length > 0,
+          twofactor: (u.twofactor_auth_configured as boolean) ?? null,
+          api_keys: Array.isArray(u.api_keys) ? (u.api_keys as unknown[]).length : 0,
+        }));
+        return respond({ count: users.length, users }, response_format, () =>
+          mdTable(
+            ["User", "UID", "Full name", "Shell", "Locked", "Sudo"],
+            users.map((u) => [u.username, u.uid, u.full_name, u.shell, u.locked ? "yes" : "no", u.sudo ? "yes" : "no"])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- groups ----------------
+  server.registerTool(
+    "truenas_list_groups",
+    {
+      title: "List Groups",
+      description:
+        "List local (and optionally directory) groups with gid, member count, sudo and SMB flags, builtin status, and " +
+        "assigned RBAC roles.",
+      inputSchema: z.object({
+        local_only: z.boolean().default(true).describe("Only local groups (exclude directory-service groups)"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        groups: z.array(
+          z.object({
+            id: z.number().nullable(),
+            gid: z.number().nullable(),
+            name: z.string().nullable(),
+            builtin: z.boolean().nullable(),
+            smb: z.boolean().nullable(),
+            sudo: z.boolean(),
+            members: z.number(),
+            roles: z.array(z.string()),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ local_only, response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().groups(local_only)) as Array<Record<string, unknown>>;
+        const groups = raw.map((g) => ({
+          id: (g.id as number) ?? null,
+          gid: (g.gid as number) ?? null,
+          name: (g.name as string) ?? null,
+          builtin: (g.builtin as boolean) ?? null,
+          smb: (g.smb as boolean) ?? null,
+          sudo: Array.isArray(g.sudo_commands) && (g.sudo_commands as unknown[]).length > 0,
+          members: Array.isArray(g.users) ? (g.users as unknown[]).length : 0,
+          roles: Array.isArray(g.roles) ? (g.roles as string[]) : [],
+        }));
+        return respond({ count: groups.length, groups }, response_format, () =>
+          mdTable(
+            ["Group", "GID", "Members", "Builtin", "Sudo", "Roles"],
+            groups.map((g) => [g.name, g.gid, g.members, g.builtin ? "yes" : "no", g.sudo ? "yes" : "no", g.roles.join(", ")])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
@@ -4894,6 +5011,131 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       run: (c, a) => c.createNvmeHost(a as { hostnqn: string }),
       summary: (a, r) => `Registered NVMe-oF host${r.id ? ` (id ${r.id})` : ""}.`,
     });
+
+    // ================================================================
+    // Identity, access & certificates (Phase 6).
+    // ================================================================
+
+    // ---------------- create API key ----------------
+    server.registerTool(
+      "truenas_create_api_key",
+      {
+        title: "Create an API Key",
+        description:
+          "Create a new API key linked to a user. The plaintext key is returned ONCE in the response — store it " +
+          "securely, it cannot be retrieved again. The key itself is never written to the audit log. Reversible " +
+          "(revoke or delete later). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          name: z.string().describe("A label for the key, e.g. 'automation'"),
+          username: z.string().describe("User to link the key to, e.g. 'truenas_admin'"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable(), name: z.string(), key: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ name, username, response_format }): Promise<ToolResult> => {
+        try {
+          const raw = (await getClient().createApiKey(name, username)) as { id?: number; key?: string };
+          // Audit records the NAME only — never the key material.
+          auditLog({ tool: "truenas_create_api_key", method: "api_key.create", target: `apikey:${name}`, outcome: "success" });
+          const structured = { created: true, id: raw?.id ?? null, name, key: raw?.key ?? null };
+          return respond(structured, response_format, () =>
+            `Created API key **${name}**${raw?.id ? ` (id ${raw.id})` : ""}.\n\n` +
+            (raw?.key ? `**Key (shown once — store it now):**\n\`${raw.key}\`` : "_No key returned._")
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_api_key", method: "api_key.create", target: `apikey:${name}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update API key ----------------
+    server.registerTool(
+      "truenas_update_api_key",
+      {
+        title: "Update / Reset / Revoke an API Key",
+        description:
+          "Rename an API key, revoke it (revoked=true), or reset it (reset=true regenerates the secret and returns " +
+          "the new key once). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("API key id (see truenas_list_api_keys)"),
+          name: z.string().optional().describe("New label"),
+          revoked: z.boolean().optional().describe("Revoke (true) or un-revoke (false) the key"),
+          reset: z.boolean().optional().describe("Regenerate the secret (returns a new key once)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number(), key: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, name, revoked, reset, response_format }): Promise<ToolResult> => {
+        try {
+          const data: Record<string, unknown> = {};
+          if (name !== undefined) data.name = name;
+          if (revoked !== undefined) data.revoked = revoked;
+          if (reset !== undefined) data.reset = reset;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied (name / revoked / reset).");
+          const raw = (await getClient().updateApiKey(id, data)) as { key?: string };
+          auditLog({ tool: "truenas_update_api_key", method: "api_key.update", target: `apikey:${id}`, outcome: "success" });
+          const structured = { updated: true, id, key: raw?.key ?? null };
+          return respond(structured, response_format, () =>
+            `Updated API key ${id}.` + (raw?.key ? `\n\n**New key (shown once):**\n\`${raw.key}\`` : "")
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_update_api_key", method: "api_key.update", target: `apikey:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create certificate ----------------
+    server.registerTool(
+      "truenas_create_certificate",
+      {
+        title: "Create / Import a Certificate",
+        description:
+          "Add a certificate. Two modes: import an existing cert with create_type='CERTIFICATE_CREATE_IMPORTED' " +
+          "(supply certificate + privatekey PEM), or generate a signing request with 'CERTIFICATE_CREATE_CSR' " +
+          "(supply the subject fields). Runs as a job. The private key/passphrase are never logged. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          name: z.string().describe("Certificate name (identifier in the store)"),
+          create_type: z.enum(["CERTIFICATE_CREATE_IMPORTED", "CERTIFICATE_CREATE_CSR"]),
+          certificate: z.string().optional().describe("Certificate PEM (IMPORTED)"),
+          privatekey: z.string().optional().describe("Private key PEM (IMPORTED)"),
+          passphrase: z.string().optional().describe("Private key passphrase (IMPORTED, if encrypted)"),
+          key_type: z.enum(["RSA", "EC"]).optional().describe("CSR key type"),
+          key_length: z.number().int().optional().describe("CSR RSA key length, e.g. 2048/4096"),
+          digest_algorithm: z.string().optional().describe("CSR digest, e.g. SHA256"),
+          country: z.string().optional(),
+          state: z.string().optional(),
+          city: z.string().optional(),
+          organization: z.string().optional(),
+          organizational_unit: z.string().optional(),
+          common: z.string().optional().describe("CSR common name (CN)"),
+          san: z.array(z.string()).optional().describe("Subject alternative names"),
+          email: z.string().optional(),
+          add_to_trusted_store: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ name: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { name, response_format } = args as { name: string; response_format?: "markdown" | "json" };
+        try {
+          const out = await getClient().createCertificate(args as Parameters<TrueNasClient["createCertificate"]>[0]);
+          auditLog({ tool: "truenas_create_certificate", method: "certificate.create", target: `cert:${name}`, outcome: out.error ? `error: ${out.error}` : out.state });
+          const structured = { name, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format ?? "markdown", () =>
+            out.error ? `Certificate **${name}** failed: ${out.error}` : `Certificate **${name}** → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_certificate", method: "certificate.create", target: `cert:${name}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 
   // ================================================================
@@ -5051,6 +5293,35 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       target: (a) => `nvme:${a.resource}:${a.id}`,
       run: (c, a) => c.deleteNvme(a.resource, a.id),
       summary: (a) => `Deleted NVMe-oF ${a.resource} ${a.id}.`,
+    });
+
+    // ---------------- identity & certificate deletions (Phase 6) ----------------
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_api_key",
+      title: "Delete an API Key",
+      description:
+        "Permanently delete an API key by id — any integration using it immediately loses access. IRREVERSIBLE. " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("API key id (see truenas_list_api_keys)"), response_format: responseFormat }),
+      method: "api_key.delete",
+      action: (a) => `delete API key ${a.id}`,
+      target: (a) => `apikey:${a.id}`,
+      run: (c, a) => c.deleteApiKey(a.id),
+      summary: (a) => `Deleted API key ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_certificate",
+      title: "Delete a Certificate",
+      description:
+        "Permanently delete a certificate by id. IRREVERSIBLE — make sure no service (web UI, app, share) still " +
+        "relies on it. Runs as a job. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("Certificate id (see truenas_list_certificates)"), response_format: responseFormat }),
+      method: "certificate.delete",
+      action: (a) => `delete certificate ${a.id}`,
+      target: (a) => `cert:${a.id}`,
+      run: (c, a) => c.deleteCertificate(a.id),
+      summary: (a) => `Deleted certificate ${a.id}.`,
     });
 
     registerDestructive(server, config, getClient, {

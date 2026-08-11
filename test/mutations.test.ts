@@ -458,3 +458,39 @@ test("deleteNvme maps resource -> method and rejects unknown", async () => {
   ]);
   await assert.rejects(() => client.deleteNvme("bogus", 1));
 });
+
+// ---------------- Phase 6: identity, access & certificates ----------------
+
+test("users/groups pass a local filter only when localOnly is true", async () => {
+  const { client, calls } = stubClient();
+  await client.users(true);
+  await client.users(false);
+  await client.groups(true);
+  assert.deepEqual(calls[0], { method: "user.query", params: [[["local", "=", true]], {}] });
+  assert.deepEqual(calls[1], { method: "user.query", params: [[], {}] });
+  assert.deepEqual(calls[2], { method: "group.query", params: [[["local", "=", true]], {}] });
+});
+
+test("createApiKey sends api_key.create with {name, username}", async () => {
+  const { client, calls } = stubClient();
+  await client.createApiKey("automation", "truenas_admin");
+  assert.equal(calls[0].method, "api_key.create");
+  assert.deepEqual(calls[0].params, [{ name: "automation", username: "truenas_admin" }]);
+});
+
+test("updateApiKey / deleteApiKey send the right method", async () => {
+  const { client, calls } = stubClient({ enableDestructive: true });
+  await client.updateApiKey(3, { reset: true });
+  await client.deleteApiKey(3);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["api_key.update", [3, { reset: true }]],
+    ["api_key.delete", [3]],
+  ]);
+});
+
+test("createCertificate keeps create_type and only provided fields", async () => {
+  const { client, calls } = stubClient();
+  await client.createCertificate({ name: "web", create_type: "CERTIFICATE_CREATE_IMPORTED", certificate: "PEM", privatekey: "KEY" });
+  assert.equal(calls[0].method, "certificate.create");
+  assert.deepEqual(calls[0].params, [{ name: "web", create_type: "CERTIFICATE_CREATE_IMPORTED", certificate: "PEM", privatekey: "KEY" }]);
+});
