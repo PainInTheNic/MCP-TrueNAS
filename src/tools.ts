@@ -17,6 +17,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { inputRequired, acceptedContent } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { TrueNasClient, TrueNasConfig, TrueNasError } from "./truenas-client.js";
+import type { JobOutcome, RsyncTaskOptions } from "./truenas-client.js";
 
 interface ToolContext {
   config: TrueNasConfig;
@@ -2722,6 +2723,73 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- rsync tasks ----------------
+  server.registerTool(
+    "truenas_list_rsync_tasks",
+    {
+      title: "List Rsync Tasks",
+      description:
+        "List configured rsync tasks (file-level backups to/from another host or rsyncd module) with local path, " +
+        "direction, remote target, schedule, and last-run state. Use the ids here with the run/update/delete rsync tools.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            id: z.number().nullable(),
+            description: z.string().nullable(),
+            path: z.string().nullable(),
+            direction: z.string().nullable(),
+            mode: z.string().nullable(),
+            remote: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            schedule: z.string().nullable(),
+            last_run_state: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().rsyncTasks()) as Array<{
+          id?: number;
+          desc?: string;
+          path?: string;
+          direction?: string;
+          mode?: string;
+          remotehost?: string;
+          remotemodule?: string;
+          remotepath?: string;
+          enabled?: boolean;
+          schedule?: { minute?: string; hour?: string; dom?: string; month?: string; dow?: string };
+          job?: { state?: string } | null;
+        }>;
+        const tasks = raw.map((t) => ({
+          id: t.id ?? null,
+          description: t.desc ?? null,
+          path: t.path ?? null,
+          direction: t.direction ?? null,
+          mode: t.mode ?? null,
+          remote: t.mode === "MODULE" ? `${t.remotehost ?? "?"}::${t.remotemodule ?? "?"}` : `${t.remotehost ?? "?"}:${t.remotepath ?? "?"}`,
+          enabled: t.enabled ?? null,
+          schedule: cronStr(t.schedule),
+          last_run_state: t.job?.state ?? null,
+        }));
+        return respond({ count: tasks.length, tasks }, response_format, () =>
+          tasks.length === 0
+            ? "No rsync tasks configured."
+            : mdTable(
+                ["Path", "Dir", "Remote", "Enabled", "Last state"],
+                tasks.map((t) => [t.path, t.direction, t.remote, t.enabled ? "yes" : "no", t.last_run_state])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
@@ -3602,6 +3670,195 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ================================================================
+    // Data-protection actions (Phase 2). Trigger existing backup tasks,
+    // provision rsync tasks, and clone snapshots — all reversible.
+    // ================================================================
+
+    // Shared helper: run an existing backup task by id and surface job state.
+    const runBackupTool = (
+      name: string,
+      method: string,
+      label: string,
+      run: (client: TrueNasClient, id: number) => Promise<JobOutcome>
+    ): void => {
+      server.registerTool(
+        name,
+        {
+          title: `Run ${label} Now`,
+          description:
+            `Manually trigger an existing ${label.toLowerCase()} task by id (see the matching list tool) so it ` +
+            `runs immediately instead of waiting for its schedule. Runs as a job; the final state is reported. ` +
+            `A safe, reversible action. Requires TRUENAS_ENABLE_WRITE=1.`,
+          inputSchema: z.object({
+            id: z.number().int().describe(`${label} task id`),
+            response_format: responseFormat,
+          }),
+          outputSchema: z.object({
+            id: z.number(),
+            job_id: z.number().nullable(),
+            state: z.string(),
+            error: z.string().nullable(),
+          }),
+          annotations: SAFE_WRITE,
+        },
+        async ({ id, response_format }): Promise<ToolResult> => {
+          try {
+            const out = await run(getClient(), id);
+            auditLog({ tool: name, method, target: `${label}:${id}`, outcome: out.error ? `error: ${out.error}` : out.state });
+            const structured = { id, job_id: out.jobId, state: out.state, error: out.error };
+            return respond(structured, response_format, () =>
+              out.error
+                ? `${label} task ${id} failed: ${out.error}`
+                : `${label} task ${id} → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+            );
+          } catch (error) {
+            auditLog({ tool: name, method, target: `${label}:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+            return errorResult(error);
+          }
+        }
+      );
+    };
+
+    runBackupTool("truenas_run_cloudsync_task", "cloudsync.sync", "Cloud Sync", (c, id) => c.runCloudsyncTask(id));
+    runBackupTool("truenas_run_replication_task", "replication.run", "Replication", (c, id) => c.runReplicationTask(id));
+    runBackupTool("truenas_run_rsync_task", "rsynctask.run", "Rsync", (c, id) => c.runRsyncTask(id));
+
+    // ---------------- clone snapshot ----------------
+    server.registerTool(
+      "truenas_clone_snapshot",
+      {
+        title: "Clone a Snapshot to a New Dataset",
+        description:
+          "Clone a ZFS snapshot into a NEW dataset. Non-destructive: the source dataset and snapshot are untouched, " +
+          "and a clone shares the snapshot's blocks (near-zero space until written). Great for recovering files " +
+          "from a snapshot or spinning up a copy for inspection. The destination must not already exist and must be " +
+          "on the same pool as the snapshot. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          snapshot: z.string().describe("Source snapshot, e.g. 'HDD/data@auto-2026-08-10_00-00'"),
+          destination: z.string().describe("New dataset path for the clone, e.g. 'HDD/restore-view' (must not exist)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ cloned: z.boolean(), snapshot: z.string(), destination: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ snapshot, destination, response_format }): Promise<ToolResult> => {
+        try {
+          assertAllowedTarget(config, destination);
+          await getClient().cloneSnapshot(snapshot, destination);
+          auditLog({ tool: "truenas_clone_snapshot", method: "pool.snapshot.clone", target: destination, outcome: "success" });
+          return respond({ cloned: true, snapshot, destination }, response_format, () =>
+            `Cloned **${snapshot}** → new dataset **${destination}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_clone_snapshot", method: "pool.snapshot.clone", target: destination, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- rsync task create / update ----------------
+    const rsyncFields = {
+      path: z.string().describe("Local path to sync, e.g. '/mnt/HDD/backups'"),
+      user: z.string().describe("Local user to run the transfer as, e.g. 'root'"),
+      direction: z.enum(["PUSH", "PULL"]).default("PUSH").describe("PUSH = send local→remote; PULL = fetch remote→local"),
+      mode: z.enum(["MODULE", "SSH"]).default("SSH").describe("SSH (to another server over SSH) or MODULE (to an rsyncd module)"),
+      remotehost: z.string().optional().describe("Remote host (SSH mode, or MODULE host)"),
+      remoteport: z.number().int().optional().describe("Remote SSH port (SSH mode)"),
+      remotemodule: z.string().optional().describe("Remote rsyncd module name (MODULE mode)"),
+      remotepath: z.string().optional().describe("Remote path (SSH mode)"),
+      ssh_credentials: z.number().int().optional().describe("Keychain SSH credential id (SSH mode; create it in the TrueNAS UI first)"),
+      desc: z.string().optional().describe("Description"),
+      recursive: z.boolean().optional(),
+      compress: z.boolean().optional(),
+      archive: z.boolean().optional(),
+      times: z.boolean().optional(),
+      delete: z.boolean().optional().describe("Delete files on the receiving side that no longer exist on the sender"),
+      preserveperm: z.boolean().optional(),
+      preserveattr: z.boolean().optional(),
+      extra: z.array(z.string()).optional().describe("Extra raw rsync flags"),
+      enabled: z.boolean().optional(),
+      minute: z.string().optional().describe("Cron minute (default '0')"),
+      hour: z.string().optional().describe("Cron hour (default '*')"),
+      dom: z.string().optional().describe("Cron day-of-month (default '*')"),
+      month: z.string().optional().describe("Cron month (default '*')"),
+      dow: z.string().optional().describe("Cron day-of-week (default '*')"),
+    };
+    const toRsyncOpts = (a: Record<string, unknown>): RsyncTaskOptions => {
+      const o: RsyncTaskOptions = {};
+      for (const k of ["path", "user", "direction", "mode", "remotehost", "remoteport", "remotemodule", "remotepath", "ssh_credentials", "desc", "recursive", "compress", "archive", "times", "delete", "preserveperm", "preserveattr", "extra", "enabled"] as const) {
+        if (a[k] !== undefined) (o as Record<string, unknown>)[k] = a[k];
+      }
+      if (a.minute !== undefined || a.hour !== undefined || a.dom !== undefined || a.month !== undefined || a.dow !== undefined) {
+        o.schedule = {
+          minute: (a.minute as string) ?? "0",
+          hour: (a.hour as string) ?? "*",
+          dom: (a.dom as string) ?? "*",
+          month: (a.month as string) ?? "*",
+          dow: (a.dow as string) ?? "*",
+        };
+      }
+      return o;
+    };
+
+    server.registerTool(
+      "truenas_create_rsync_task",
+      {
+        title: "Create Rsync Task",
+        description:
+          "Create a scheduled rsync task (e.g. to back up a dataset to another NAS). SSH mode needs a keychain SSH " +
+          "credential (create it once in the TrueNAS UI) plus remotehost/remotepath; MODULE mode needs remotehost " +
+          "and remotemodule. This does NOT modify the local SSH server. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({ ...rsyncFields, response_format: responseFormat }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable(), path: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args;
+        try {
+          assertAllowedTarget(config, args.path as string);
+          const raw = (await getClient().createRsyncTask(toRsyncOpts(args))) as { id?: number };
+          auditLog({ tool: "truenas_create_rsync_task", method: "rsynctask.create", target: args.path as string, outcome: "success" });
+          return respond({ created: true, id: raw?.id ?? null, path: args.path as string }, response_format, () =>
+            `Created rsync task${raw?.id ? ` (id ${raw.id})` : ""} for **${args.path}** → ${args.remotehost ?? args.remotemodule ?? "remote"}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_rsync_task", method: "rsynctask.create", target: args.path as string, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    server.registerTool(
+      "truenas_update_rsync_task",
+      {
+        title: "Update Rsync Task",
+        description:
+          "Update an existing rsync task by id (see truenas_list_rsync_tasks). Supply only the fields you want to " +
+          "change. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("Rsync task id"),
+          ...Object.fromEntries(Object.entries(rsyncFields).map(([k, v]) => [k, (v as z.ZodTypeAny).isOptional() ? v : (v as z.ZodTypeAny).optional()])),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { id, response_format } = args as { id: number; response_format?: "markdown" | "json" };
+        try {
+          const opts = toRsyncOpts(args as Record<string, unknown>);
+          if (Object.keys(opts).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateRsyncTask(id, opts);
+          auditLog({ tool: "truenas_update_rsync_task", method: "rsynctask.update", target: `rsync:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated rsync task ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_rsync_task", method: "rsynctask.update", target: `rsync:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 
   // ================================================================
@@ -3677,6 +3934,49 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       target: (a) => `nfs:${a.id}`,
       run: (c, a) => c.deleteNfsShare(a.id),
       summary: (a) => `Deleted NFS export ${a.id}.`,
+    });
+
+    // ---------------- data-protection task deletions (Phase 2) ----------------
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_rsync_task",
+      title: "Delete Rsync Task",
+      description:
+        "Delete a scheduled rsync task by id. The task definition is removed; data already synced is NOT touched. " +
+        "Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("Rsync task id (see truenas_list_rsync_tasks)"), response_format: responseFormat }),
+      method: "rsynctask.delete",
+      action: (a) => `delete rsync task ${a.id}`,
+      target: (a) => `rsync:${a.id}`,
+      run: (c, a) => c.deleteRsyncTask(a.id),
+      summary: (a) => `Deleted rsync task ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_cloudsync_task",
+      title: "Delete Cloud Sync Task",
+      description:
+        "Delete a cloud-sync (cloud backup) task by id. The task definition is removed; data already in the cloud " +
+        "is NOT touched. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("Cloud sync task id (see truenas_list_cloudsync_tasks)"), response_format: responseFormat }),
+      method: "cloudsync.delete",
+      action: (a) => `delete cloud sync task ${a.id}`,
+      target: (a) => `cloudsync:${a.id}`,
+      run: (c, a) => c.deleteCloudsyncTask(a.id),
+      summary: (a) => `Deleted cloud sync task ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_replication_task",
+      title: "Delete Replication Task",
+      description:
+        "Delete a ZFS replication task by id. The task definition is removed; snapshots already replicated are NOT " +
+        "touched. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({ id: z.number().int().describe("Replication task id (see truenas_list_replication_tasks)"), response_format: responseFormat }),
+      method: "replication.delete",
+      action: (a) => `delete replication task ${a.id}`,
+      target: (a) => `replication:${a.id}`,
+      run: (c, a) => c.deleteReplicationTask(a.id),
+      summary: (a) => `Deleted replication task ${a.id}.`,
     });
 
     registerDestructive(server, config, getClient, {

@@ -60,6 +60,30 @@ export interface JobOutcome {
   result: unknown;
 }
 
+/** Typed options for rsynctask.create / rsynctask.update (assembled in rsyncPayload). */
+export interface RsyncTaskOptions {
+  path?: string;
+  user?: string;
+  direction?: "PUSH" | "PULL";
+  mode?: "MODULE" | "SSH";
+  remotehost?: string;
+  remoteport?: number;
+  remotemodule?: string;
+  remotepath?: string;
+  ssh_credentials?: number;
+  desc?: string;
+  recursive?: boolean;
+  compress?: boolean;
+  archive?: boolean;
+  times?: boolean;
+  delete?: boolean;
+  preserveperm?: boolean;
+  preserveattr?: boolean;
+  extra?: string[];
+  enabled?: boolean;
+  schedule?: Record<string, string>;
+}
+
 class JsonRpcError extends Error {
   constructor(
     readonly code: number,
@@ -717,6 +741,13 @@ export class TrueNasClient {
     );
   }
 
+  async rsyncTasks(): Promise<unknown[]> {
+    return this.wsOnly(
+      "rsync task",
+      async () => (normalizeDates(await this.call("rsynctask.query", [[], {}])) as unknown[]) ?? []
+    );
+  }
+
   async smbShares(): Promise<unknown[]> {
     return this.wsOnly("SMB share", async () => ((await this.call("sharing.smb.query", [[], {}])) as unknown[]) ?? []);
   }
@@ -999,6 +1030,26 @@ export class TrueNasClient {
   }
 
   // ------------------------------------------------------------------
+  // Data-protection actions (Phase 2). Manually trigger existing backup
+  // tasks; each runs as a @job so we surface the final job state.
+  // ------------------------------------------------------------------
+
+  /** cloudsync.sync — trigger an existing cloud-sync (backup) task now. */
+  async runCloudsyncTask(id: number): Promise<JobOutcome> {
+    return this.wsOnly("cloudsync run", () => this.callJob("cloudsync.sync", [id]));
+  }
+
+  /** replication.run — trigger an existing ZFS replication task now. */
+  async runReplicationTask(id: number): Promise<JobOutcome> {
+    return this.wsOnly("replication run", () => this.callJob("replication.run", [id]));
+  }
+
+  /** rsynctask.run — trigger an existing rsync task now. */
+  async runRsyncTask(id: number): Promise<JobOutcome> {
+    return this.wsOnly("rsync run", () => this.callJob("rsynctask.run", [id]));
+  }
+
+  // ------------------------------------------------------------------
   // Provisioning (create/update). All WebSocket-only and synchronous. The
   // typed option objects are assembled into the API payload HERE (not in the
   // tool handlers) so the exact params are unit-testable.
@@ -1159,6 +1210,31 @@ export class TrueNasClient {
     return this.provision("pool.scrub.update", [id, data]);
   }
 
+  /** pool.snapshot.clone — clone a snapshot into a NEW dataset (non-destructive; the source is untouched). */
+  async cloneSnapshot(snapshot: string, datasetDst: string): Promise<unknown> {
+    return this.provision("pool.snapshot.clone", [{ snapshot, dataset_dst: datasetDst }]);
+  }
+
+  /** Assemble an rsync-task payload from typed options (shared by create/update). */
+  private rsyncPayload(opts: RsyncTaskOptions): Record<string, unknown> {
+    const data: Record<string, unknown> = {};
+    const copy: (keyof RsyncTaskOptions)[] = [
+      "path", "user", "direction", "mode", "remotehost", "remoteport", "remotemodule",
+      "remotepath", "ssh_credentials", "desc", "recursive", "compress", "archive",
+      "times", "delete", "preserveperm", "preserveattr", "extra", "enabled", "schedule",
+    ];
+    for (const k of copy) if (opts[k] !== undefined) data[k] = opts[k];
+    return data;
+  }
+
+  async createRsyncTask(opts: RsyncTaskOptions): Promise<unknown> {
+    return this.provision("rsynctask.create", [this.rsyncPayload(opts)]);
+  }
+
+  async updateRsyncTask(id: number, opts: RsyncTaskOptions): Promise<unknown> {
+    return this.provision("rsynctask.update", [id, this.rsyncPayload(opts)]);
+  }
+
   // ------------------------------------------------------------------
   // Destructive operations. WebSocket-only; gated at the tool layer by
   // TRUENAS_ENABLE_DESTRUCTIVE + a human elicitation confirmation.
@@ -1199,6 +1275,18 @@ export class TrueNasClient {
 
   async deleteGroup(id: number, deleteUsers?: boolean): Promise<unknown> {
     return this.provision("group.delete", deleteUsers !== undefined ? [id, { delete_users: deleteUsers }] : [id]);
+  }
+
+  async deleteRsyncTask(id: number): Promise<unknown> {
+    return this.provision("rsynctask.delete", [id]);
+  }
+
+  async deleteCloudsyncTask(id: number): Promise<unknown> {
+    return this.provision("cloudsync.delete", [id]);
+  }
+
+  async deleteReplicationTask(id: number): Promise<unknown> {
+    return this.provision("replication.delete", [id]);
   }
 
   /** pool.snapshot.rollback — revert a dataset to a snapshot (destroys newer data). */

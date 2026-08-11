@@ -240,3 +240,76 @@ test("deleteApp sends app.delete with remove_ix_volumes", async () => {
   assert.equal(calls[0].method, "app.delete");
   assert.deepEqual(calls[0].params, ["prometheus", { remove_ix_volumes: true }]);
 });
+
+// ---------------- Phase 2: data-protection actions ----------------
+
+test("cloneSnapshot sends pool.snapshot.clone with {snapshot, dataset_dst}", async () => {
+  const { client, calls } = stubClient();
+  await client.cloneSnapshot("HDD/data@snap1", "HDD/restore-view");
+  assert.equal(calls[0].method, "pool.snapshot.clone");
+  assert.deepEqual(calls[0].params, [{ snapshot: "HDD/data@snap1", dataset_dst: "HDD/restore-view" }]);
+});
+
+test("runCloudsyncTask / runReplicationTask / runRsyncTask send the right job method with [id]", async () => {
+  const { client, calls } = stubClient();
+  await client.runCloudsyncTask(2);
+  await client.runReplicationTask(3);
+  await client.runRsyncTask(4);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["cloudsync.sync", [2]],
+    ["replication.run", [3]],
+    ["rsynctask.run", [4]],
+  ]);
+});
+
+test("createRsyncTask includes only provided fields and passes schedule through", async () => {
+  const { client, calls } = stubClient();
+  await client.createRsyncTask({
+    path: "/mnt/HDD/backups",
+    user: "root",
+    mode: "SSH",
+    direction: "PUSH",
+    remotehost: "othernas",
+    remotepath: "/mnt/tank/in",
+    ssh_credentials: 1,
+    schedule: { minute: "0", hour: "2", dom: "*", month: "*", dow: "*" },
+  });
+  assert.equal(calls[0].method, "rsynctask.create");
+  assert.deepEqual(calls[0].params, [
+    {
+      path: "/mnt/HDD/backups",
+      user: "root",
+      mode: "SSH",
+      direction: "PUSH",
+      remotehost: "othernas",
+      remotepath: "/mnt/tank/in",
+      ssh_credentials: 1,
+      schedule: { minute: "0", hour: "2", dom: "*", month: "*", dow: "*" },
+    },
+  ]);
+});
+
+test("createRsyncTask omits undefined optionals entirely", async () => {
+  const { client, calls } = stubClient();
+  await client.createRsyncTask({ path: "/mnt/HDD/x", user: "backup" });
+  assert.deepEqual(calls[0].params, [{ path: "/mnt/HDD/x", user: "backup" }]);
+});
+
+test("updateRsyncTask sends rsynctask.update with [id, partial-data]", async () => {
+  const { client, calls } = stubClient();
+  await client.updateRsyncTask(7, { enabled: false });
+  assert.equal(calls[0].method, "rsynctask.update");
+  assert.deepEqual(calls[0].params, [7, { enabled: false }]);
+});
+
+test("deleteRsyncTask / deleteCloudsyncTask / deleteReplicationTask send delete with [id]", async () => {
+  const { client, calls } = stubClient({ enableDestructive: true });
+  await client.deleteRsyncTask(1);
+  await client.deleteCloudsyncTask(2);
+  await client.deleteReplicationTask(3);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["rsynctask.delete", [1]],
+    ["cloudsync.delete", [2]],
+    ["replication.delete", [3]],
+  ]);
+});
