@@ -349,3 +349,47 @@ test("updateVm sends vm.update with [id, partial-data]", async () => {
   assert.equal(calls[0].method, "vm.update");
   assert.deepEqual(calls[0].params, [17, { vcpus: 4, description: "hi" }]);
 });
+
+// ---------------- Phase 4: storage & encryption depth ----------------
+
+test("unlockDataset nests the secret under datasets[] and passes recursive", async () => {
+  const { client, calls } = stubClient();
+  await client.unlockDataset("SSD/PostgreSQL", { passphrase: "s3cr3t", recursive: true });
+  assert.equal(calls[0].method, "pool.dataset.unlock");
+  assert.deepEqual(calls[0].params, [
+    "SSD/PostgreSQL",
+    { datasets: [{ name: "SSD/PostgreSQL", passphrase: "s3cr3t" }], recursive: true },
+  ]);
+});
+
+test("unlockDataset uses key when given instead of passphrase", async () => {
+  const { client, calls } = stubClient();
+  await client.unlockDataset("SSD", { key: "deadbeef" });
+  assert.deepEqual(calls[0].params, ["SSD", { datasets: [{ name: "SSD", key: "deadbeef" }] }]);
+});
+
+test("changeDatasetKey sends pool.dataset.change_key with only provided options", async () => {
+  const { client, calls } = stubClient();
+  await client.changeDatasetKey("SSD", { generate_key: true });
+  assert.equal(calls[0].method, "pool.dataset.change_key");
+  assert.deepEqual(calls[0].params, ["SSD", { generate_key: true }]);
+});
+
+test("encryptionSummary sends pool.dataset.encryption_summary with [id]", async () => {
+  const { client, calls } = stubClient();
+  await client.encryptionSummary("SSD");
+  assert.equal(calls[0].method, "pool.dataset.encryption_summary");
+  assert.deepEqual(calls[0].params, ["SSD"]);
+});
+
+test("promoteDataset / holdSnapshot / releaseSnapshot send their method with [id]", async () => {
+  const { client, calls } = stubClient();
+  await client.promoteDataset("HDD/clone");
+  await client.holdSnapshot("HDD@keep");
+  await client.releaseSnapshot("HDD@keep");
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["pool.dataset.promote", ["HDD/clone"]],
+    ["pool.snapshot.hold", ["HDD@keep"]],
+    ["pool.snapshot.release", ["HDD@keep"]],
+  ]);
+});

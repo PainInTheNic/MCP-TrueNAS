@@ -64,7 +64,10 @@ the structured result is machine-validated by the MCP client.
 - `truenas_get_system_info` — version, hostname, uptime, CPU, RAM, load
 - `truenas_check_updates` — whether a base-OS update is available, plus reboot-required state
 - `truenas_list_pools` — pool health, capacity, usage %, fragmentation, scrub activity
+- `truenas_get_pool` — one pool's full topology (data/cache/log/spare vdevs, per-disk state & errors) + scrub status
 - `truenas_list_datasets` — space used/available, quotas, compression (filter by pool, paginated)
+- `truenas_get_dataset` — one dataset's full properties: encryption, quotas, recordsize, compression ratio, dedup, sync
+- `truenas_encryption_summary` — encrypted dataset key/lock status (no key material shown)
 - `truenas_list_disks` — model, serial, size, pool membership, optional temperatures
 - `truenas_list_snapshots` — snapshots with creation time and space (filter by dataset, paginated)
 
@@ -123,6 +126,10 @@ the structured result is machine-validated by the MCP client.
 - `truenas_clone_snapshot` — clone a snapshot into a new dataset (non-destructive; great for file recovery)
 - `truenas_create_rsync_task` / `truenas_update_rsync_task` — define/adjust an rsync backup to another NAS (does not touch local SSH)
 - `truenas_create_dataset` / `truenas_rename_dataset` — create a dataset or zvol; rename a dataset
+- `truenas_unlock_dataset` — unlock an encrypted dataset (passphrase/key never logged)
+- `truenas_change_dataset_key` — rotate an encrypted dataset's passphrase/key (data preserved)
+- `truenas_promote_dataset` — promote a clone so it no longer depends on its origin snapshot
+- `truenas_hold_snapshot` / `truenas_release_snapshot` — protect a snapshot from deletion, then release it
 - `truenas_create_smb_share` / `truenas_update_smb_share` — SMB shares
 - `truenas_create_nfs_share` / `truenas_update_nfs_share` — NFS exports
 - `truenas_create_user` / `truenas_update_user` / `truenas_set_user_password` — local users (passwords never logged)
@@ -153,7 +160,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **40 read, 32 safe-write, 20 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **43 read, 37 safe-write, 20 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

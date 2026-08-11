@@ -2979,6 +2979,229 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- pool detail (topology) ----------------
+  server.registerTool(
+    "truenas_get_pool",
+    {
+      title: "Get Pool Detail (Topology)",
+      description:
+        "Show one pool's full topology — data/cache/log/spare/special vdevs, the disks in each, their state and " +
+        "per-disk error counts — plus capacity and the last scrub/resilver status. Use this to see RAIDZ/mirror " +
+        "layout and spot a degraded disk.",
+      inputSchema: z.object({
+        pool: z.string().describe("Pool name, e.g. 'SSD'"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        name: z.string().nullable(),
+        status: z.string().nullable(),
+        healthy: z.boolean().nullable(),
+        warning: z.boolean().nullable(),
+        size: z.string().nullable(),
+        allocated: z.string().nullable(),
+        free: z.string().nullable(),
+        fragmentation: z.string().nullable(),
+        scan: z.record(z.string(), z.unknown()).nullable(),
+        topology: z.record(
+          z.string(),
+          z.array(
+            z.object({
+              type: z.string().nullable(),
+              status: z.string().nullable(),
+              disks: z.array(z.object({ name: z.string().nullable(), status: z.string().nullable(), errors: z.number() })),
+            })
+          )
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ pool, response_format }): Promise<ToolResult> => {
+      try {
+        const p = (await getClient().poolDetail(pool)) as Record<string, unknown> | null;
+        if (!p) throw new TrueNasError(`Pool '${pool}' not found.`);
+        const base = (s: string | undefined): string | null => (s ? s.split("/").pop() ?? s : null);
+        const diskInfo = (d: Record<string, unknown>) => {
+          const st = (d.stats as { read_errors?: number; write_errors?: number; checksum_errors?: number }) ?? {};
+          return {
+            name: base((d.path as string) ?? (d.name as string)),
+            status: (d.status as string) ?? null,
+            errors: (st.read_errors ?? 0) + (st.write_errors ?? 0) + (st.checksum_errors ?? 0),
+          };
+        };
+        const summarize = (list: unknown): Array<{ type: string | null; status: string | null; disks: ReturnType<typeof diskInfo>[] }> =>
+          (Array.isArray(list) ? (list as Array<Record<string, unknown>>) : []).map((v) => ({
+            type: (v.type as string) ?? null,
+            status: (v.status as string) ?? null,
+            disks: Array.isArray(v.children) && (v.children as unknown[]).length
+              ? (v.children as Array<Record<string, unknown>>).map(diskInfo)
+              : [diskInfo(v)],
+          }));
+        const topoRaw = (p.topology as Record<string, unknown>) ?? {};
+        const topology: Record<string, ReturnType<typeof summarize>> = {};
+        for (const cat of ["data", "cache", "log", "spare", "special", "dedup"]) {
+          const s = summarize(topoRaw[cat]);
+          if (s.length) topology[cat] = s;
+        }
+        const scan = (p.scan as Record<string, unknown>) ?? null;
+        const structured = {
+          name: (p.name as string) ?? null,
+          status: (p.status as string) ?? null,
+          healthy: (p.healthy as boolean) ?? null,
+          warning: (p.warning as boolean) ?? null,
+          size: (p.size_str as string) ?? null,
+          allocated: (p.allocated_str as string) ?? null,
+          free: (p.free_str as string) ?? null,
+          fragmentation: p.fragmentation != null ? `${p.fragmentation}%` : null,
+          scan,
+          topology,
+        };
+        return respond(structured, response_format, () => {
+          const lines = [
+            `**${structured.name}** — ${structured.status} (${structured.healthy ? "healthy" : "check"}) · ${structured.allocated}/${structured.size} used, frag ${structured.fragmentation}`,
+          ];
+          for (const [cat, vdevs] of Object.entries(topology)) {
+            lines.push(`\n**${cat}:**`);
+            for (const v of vdevs) {
+              lines.push(`- ${v.type} (${v.status}): ` + v.disks.map((d) => `${d.name}${d.errors ? ` ⚠${d.errors}` : ""} [${d.status}]`).join(", "));
+            }
+          }
+          if (scan) lines.push(`\n_Last ${scan.function}: ${scan.state}${scan.errors != null ? `, ${scan.errors} errors` : ""}._`);
+          return lines.join("\n");
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- dataset detail ----------------
+  server.registerTool(
+    "truenas_get_dataset",
+    {
+      title: "Get Dataset Detail",
+      description:
+        "Show one dataset's full properties: encryption status (encrypted/locked/key-loaded, algorithm), quotas and " +
+        "reservations, record size, compression + achieved ratio, dedup, sync, atime, and a space-usage breakdown.",
+      inputSchema: z.object({
+        dataset: z.string().describe("Dataset id / full path, e.g. 'SSD/PostgreSQL'"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        id: z.string().nullable(),
+        type: z.string().nullable(),
+        encrypted: z.boolean().nullable(),
+        locked: z.boolean().nullable(),
+        key_loaded: z.boolean().nullable(),
+        encryption_root: z.string().nullable(),
+        encryption_algorithm: z.string().nullable(),
+        used: z.string().nullable(),
+        available: z.string().nullable(),
+        quota: z.string().nullable(),
+        refquota: z.string().nullable(),
+        recordsize: z.string().nullable(),
+        compression: z.string().nullable(),
+        compressratio: z.string().nullable(),
+        deduplication: z.string().nullable(),
+        sync: z.string().nullable(),
+        atime: z.string().nullable(),
+        readonly: z.string().nullable(),
+        mountpoint: z.string().nullable(),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ dataset, response_format }): Promise<ToolResult> => {
+      try {
+        const d = (await getClient().datasetDetail(dataset)) as Record<string, RawZfsProp | unknown> | null;
+        if (!d) throw new TrueNasError(`Dataset '${dataset}' not found.`);
+        const prop = (k: string): string | null => propStr(d[k] as RawZfsProp);
+        const structured = {
+          id: (d.id as string) ?? null,
+          type: (d.type as string) ?? null,
+          encrypted: (d.encrypted as boolean) ?? null,
+          locked: (d.locked as boolean) ?? null,
+          key_loaded: (d.key_loaded as boolean) ?? null,
+          encryption_root: (d.encryption_root as string) ?? null,
+          encryption_algorithm: prop("encryption_algorithm"),
+          used: prop("used"),
+          available: prop("available"),
+          quota: prop("quota"),
+          refquota: prop("refquota"),
+          recordsize: prop("recordsize"),
+          compression: prop("compression"),
+          compressratio: prop("compressratio"),
+          deduplication: prop("deduplication"),
+          sync: prop("sync"),
+          atime: prop("atime"),
+          readonly: prop("readonly"),
+          mountpoint: prop("mountpoint"),
+        };
+        return respond(structured, response_format, () =>
+          [
+            `**${structured.id}** (${structured.type})`,
+            `Encryption: ${structured.encrypted ? `yes — ${structured.encryption_algorithm ?? "?"}, ${structured.locked ? "LOCKED" : "unlocked"} (key ${structured.key_loaded ? "loaded" : "not loaded"}), root ${structured.encryption_root}` : "no"}`,
+            `Space: ${structured.used} used, ${structured.available} available` + (structured.quota && structured.quota !== "0" ? `, quota ${structured.quota}` : ""),
+            `recordsize ${structured.recordsize} · compression ${structured.compression} (${structured.compressratio}) · dedup ${structured.deduplication} · sync ${structured.sync}`,
+            `mountpoint ${structured.mountpoint}`,
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- encryption summary ----------------
+  server.registerTool(
+    "truenas_encryption_summary",
+    {
+      title: "Dataset Encryption Summary",
+      description:
+        "Report the encryption/lock status of a dataset and its encrypted children: key format, whether a valid key " +
+        "is stored, and whether each is currently locked. No key material is returned. Read-only (runs as a job).",
+      inputSchema: z.object({
+        dataset: z.string().describe("Dataset id / full path, e.g. 'SSD'"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        dataset: z.string(),
+        entries: z.array(
+          z.object({
+            name: z.string().nullable(),
+            key_format: z.string().nullable(),
+            key_present_in_database: z.boolean().nullable(),
+            valid_key: z.boolean().nullable(),
+            locked: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ dataset, response_format }): Promise<ToolResult> => {
+      try {
+        const out = await getClient().encryptionSummary(dataset);
+        if (out.error) throw new TrueNasError(out.error);
+        const rows = Array.isArray(out.result) ? (out.result as Array<Record<string, unknown>>) : [];
+        const entries = rows.map((r) => ({
+          name: (r.name as string) ?? null,
+          key_format: (r.key_format as string) ?? null,
+          key_present_in_database: (r.key_present_in_database as boolean) ?? null,
+          valid_key: (r.valid_key as boolean) ?? null,
+          locked: (r.locked as boolean) ?? null,
+        }));
+        return respond({ dataset, entries }, response_format, () =>
+          entries.length === 0
+            ? `No encrypted datasets under ${dataset}.`
+            : mdTable(
+                ["Dataset", "Key format", "Key stored", "Valid key", "Locked"],
+                entries.map((e) => [e.name, e.key_format, e.key_present_in_database ? "yes" : "no", e.valid_key ? "yes" : "no", e.locked ? "yes" : "no"])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
@@ -4202,6 +4425,161 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated VM ${id}.`);
         } catch (error) {
           auditLog({ tool: "truenas_update_vm", method: "vm.update", target: `vm:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ================================================================
+    // Storage & encryption depth (Phase 4).
+    // ================================================================
+
+    // ---------------- unlock encrypted dataset ----------------
+    server.registerTool(
+      "truenas_unlock_dataset",
+      {
+        title: "Unlock an Encrypted Dataset",
+        description:
+          "Unlock a locked encrypted dataset by supplying its passphrase or hex key. Reversible (see " +
+          "truenas_lock_dataset). Runs as a job. The secret is sent straight to TrueNAS and is never logged or echoed. " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Encrypted dataset id / path, e.g. 'SSD/PostgreSQL'"),
+          passphrase: z.string().optional().describe("Passphrase (for passphrase-encrypted datasets)"),
+          key: z.string().optional().describe("Hex key (for key-encrypted datasets)"),
+          recursive: z.boolean().default(false).describe("Also unlock encrypted children"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ dataset: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, passphrase, key, recursive, response_format }): Promise<ToolResult> => {
+        try {
+          if (!passphrase && !key) throw new TrueNasError("Provide either a passphrase or a hex key to unlock.");
+          const out = await getClient().unlockDataset(dataset, { passphrase, key, recursive });
+          // NOTE: target is the dataset name only — the passphrase/key is never logged.
+          auditLog({ tool: "truenas_unlock_dataset", method: "pool.dataset.unlock", target: dataset, outcome: out.error ? `error: ${out.error}` : out.state });
+          const structured = { dataset, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error ? `Unlock of **${dataset}** failed: ${out.error}` : `Unlocked **${dataset}** → **${out.state}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_unlock_dataset", method: "pool.dataset.unlock", target: dataset, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- change dataset encryption key ----------------
+    server.registerTool(
+      "truenas_change_dataset_key",
+      {
+        title: "Rotate a Dataset's Encryption Key",
+        description:
+          "Change an encrypted dataset's passphrase or key (re-wraps the key — data is preserved). Supply a new " +
+          "passphrase, a new hex key, or generate_key=true to have TrueNAS generate one. Runs as a job. The secret is " +
+          "never logged or echoed. Back up your config afterward. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Encrypted dataset id / path"),
+          passphrase: z.string().optional().describe("New passphrase"),
+          key: z.string().optional().describe("New hex key"),
+          generate_key: z.boolean().optional().describe("Let TrueNAS generate a new random key"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ dataset: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, passphrase, key, generate_key, response_format }): Promise<ToolResult> => {
+        try {
+          if (!passphrase && !key && !generate_key) throw new TrueNasError("Provide a new passphrase, a hex key, or generate_key=true.");
+          const out = await getClient().changeDatasetKey(dataset, { passphrase, key, generate_key });
+          auditLog({ tool: "truenas_change_dataset_key", method: "pool.dataset.change_key", target: dataset, outcome: out.error ? `error: ${out.error}` : out.state });
+          const structured = { dataset, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error ? `Key rotation for **${dataset}** failed: ${out.error}` : `Rotated encryption key for **${dataset}** → **${out.state}**. Back up your config now.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_change_dataset_key", method: "pool.dataset.change_key", target: dataset, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- promote clone ----------------
+    server.registerTool(
+      "truenas_promote_dataset",
+      {
+        title: "Promote a Cloned Dataset",
+        description:
+          "Promote a clone (from truenas_clone_snapshot) so it no longer depends on its origin snapshot — after this " +
+          "the origin dataset/snapshot can be deleted independently. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          dataset: z.string().describe("Clone dataset id / path to promote"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ promoted: z.boolean(), dataset: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ dataset, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().promoteDataset(dataset);
+          auditLog({ tool: "truenas_promote_dataset", method: "pool.dataset.promote", target: dataset, outcome: "success" });
+          return respond({ promoted: true, dataset }, response_format, () => `Promoted clone **${dataset}** — it is now independent of its origin.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_promote_dataset", method: "pool.dataset.promote", target: dataset, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- hold / release snapshot ----------------
+    server.registerTool(
+      "truenas_hold_snapshot",
+      {
+        title: "Hold a Snapshot (Protect from Deletion)",
+        description:
+          "Place a hold on a snapshot so it cannot be deleted until released. Useful to protect a known-good " +
+          "restore point. Reversible with truenas_release_snapshot. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          snapshot: z.string().describe("Snapshot id, e.g. 'HDD/data@keep-me'"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ held: z.boolean(), snapshot: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ snapshot, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().holdSnapshot(snapshot);
+          auditLog({ tool: "truenas_hold_snapshot", method: "pool.snapshot.hold", target: snapshot, outcome: "success" });
+          return respond({ held: true, snapshot }, response_format, () => `Held snapshot **${snapshot}** — it can't be deleted until released.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_hold_snapshot", method: "pool.snapshot.hold", target: snapshot, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    server.registerTool(
+      "truenas_release_snapshot",
+      {
+        title: "Release a Snapshot Hold",
+        description:
+          "Remove a hold placed by truenas_hold_snapshot, allowing the snapshot to be deleted again. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          snapshot: z.string().describe("Snapshot id, e.g. 'HDD/data@keep-me'"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ released: z.boolean(), snapshot: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ snapshot, response_format }): Promise<ToolResult> => {
+        try {
+          await getClient().releaseSnapshot(snapshot);
+          auditLog({ tool: "truenas_release_snapshot", method: "pool.snapshot.release", target: snapshot, outcome: "success" });
+          return respond({ released: true, snapshot }, response_format, () => `Released hold on **${snapshot}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_release_snapshot", method: "pool.snapshot.release", target: snapshot, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
           return errorResult(error);
         }
       }

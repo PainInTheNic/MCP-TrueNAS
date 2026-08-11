@@ -1121,6 +1121,64 @@ export class TrueNasClient {
   }
 
   // ------------------------------------------------------------------
+  // Storage & encryption depth (Phase 4).
+  // ------------------------------------------------------------------
+
+  /** pool.query for a single pool by name — full topology + scan status. */
+  async poolDetail(name: string): Promise<unknown> {
+    return this.wsOnly("pool detail", async () => {
+      const rows = normalizeDates(await this.call("pool.query", [[["name", "=", name]], {}])) as unknown[];
+      return rows?.[0] ?? null;
+    });
+  }
+
+  /** pool.dataset.query for a single dataset by id — full properties. */
+  async datasetDetail(id: string): Promise<unknown> {
+    return this.wsOnly("dataset detail", async () => {
+      const rows = normalizeDates(
+        await this.call("pool.dataset.query", [[["id", "=", id]], { extra: { retrieve_children: false } }])
+      ) as unknown[];
+      return rows?.[0] ?? null;
+    });
+  }
+
+  /** pool.dataset.encryption_summary — per-dataset key/lock status (runs as a @job; non-mutating). */
+  async encryptionSummary(id: string): Promise<JobOutcome> {
+    return this.wsOnly("encryption summary", () => this.callJob("pool.dataset.encryption_summary", [id]));
+  }
+
+  /**
+   * pool.dataset.unlock — unlock an encrypted dataset (runs as a @job).
+   * The passphrase/key is passed straight to the API and is NEVER logged.
+   */
+  async unlockDataset(
+    id: string,
+    opts: { passphrase?: string; key?: string; recursive?: boolean }
+  ): Promise<JobOutcome> {
+    const entry: Record<string, unknown> = { name: id };
+    if (opts.passphrase !== undefined) entry.passphrase = opts.passphrase;
+    if (opts.key !== undefined) entry.key = opts.key;
+    const options: Record<string, unknown> = { datasets: [entry] };
+    if (opts.recursive !== undefined) options.recursive = opts.recursive;
+    return this.wsOnly("dataset unlock", () => this.callJob("pool.dataset.unlock", [id, options]));
+  }
+
+  /**
+   * pool.dataset.change_key — rotate an encrypted dataset's key/passphrase (runs as a @job).
+   * The secret is passed straight to the API and is NEVER logged.
+   */
+  async changeDatasetKey(
+    id: string,
+    opts: { passphrase?: string; key?: string; generate_key?: boolean }
+  ): Promise<JobOutcome> {
+    const options: Record<string, unknown> = {};
+    if (opts.passphrase !== undefined) options.passphrase = opts.passphrase;
+    if (opts.key !== undefined) options.key = opts.key;
+    if (opts.generate_key !== undefined) options.generate_key = opts.generate_key;
+    return this.wsOnly("dataset change key", () => this.callJob("pool.dataset.change_key", [id, options]));
+  }
+
+  // ------------------------------------------------------------------
   // Provisioning (create/update). All WebSocket-only and synchronous. The
   // typed option objects are assembled into the API payload HERE (not in the
   // tool handlers) so the exact params are unit-testable.
@@ -1171,6 +1229,21 @@ export class TrueNasClient {
     ];
     for (const k of copy) if (opts[k] !== undefined) data[k] = opts[k];
     return data;
+  }
+
+  /** pool.dataset.promote — make a clone independent of its origin snapshot. */
+  async promoteDataset(id: string): Promise<unknown> {
+    return this.provision("pool.dataset.promote", [id]);
+  }
+
+  /** pool.snapshot.hold — protect a snapshot from deletion. */
+  async holdSnapshot(id: string): Promise<unknown> {
+    return this.provision("pool.snapshot.hold", [id]);
+  }
+
+  /** pool.snapshot.release — remove a hold, allowing the snapshot to be deleted again. */
+  async releaseSnapshot(id: string): Promise<unknown> {
+    return this.provision("pool.snapshot.release", [id]);
   }
 
   async createSmbShare(opts: {
