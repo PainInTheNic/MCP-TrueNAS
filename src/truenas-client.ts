@@ -766,6 +766,69 @@ export class TrueNasClient {
   }
 
   // ------------------------------------------------------------------
+  // Phase 1 config & inventory reads (WebSocket-only). Secret stripping
+  // happens in the tool projections, not here.
+  // ------------------------------------------------------------------
+
+  async systemGeneralConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("system config", async () => (await this.call("system.general.config")) as Record<string, unknown>);
+  }
+  async systemAdvancedConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("advanced config", async () => (await this.call("system.advanced.config")) as Record<string, unknown>);
+  }
+  async systemSecurityConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("security config", async () => (await this.call("system.security.config")) as Record<string, unknown>);
+  }
+  async systemDatasetConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("system dataset config", async () => (await this.call("systemdataset.config")) as Record<string, unknown>);
+  }
+  async systemState(): Promise<unknown> {
+    return this.wsOnly("system state", () => this.call("system.state"));
+  }
+  async ntpServers(): Promise<unknown[]> {
+    return this.wsOnly("NTP servers", async () => ((await this.call("system.ntpserver.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async initScripts(): Promise<unknown[]> {
+    return this.wsOnly("init/shutdown scripts", async () => ((await this.call("initshutdownscript.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async cronJobs(): Promise<unknown[]> {
+    return this.wsOnly("cron jobs", async () => ((await this.call("cronjob.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async tunables(): Promise<unknown[]> {
+    return this.wsOnly("tunables", async () => ((await this.call("tunable.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async mailConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("mail config", async () => (await this.call("mail.config")) as Record<string, unknown>);
+  }
+  async alertServices(): Promise<unknown[]> {
+    return this.wsOnly("alert services", async () => ((await this.call("alertservice.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async alertClasses(): Promise<Record<string, unknown>> {
+    return this.wsOnly("alert classes", async () => (await this.call("alertclasses.config")) as Record<string, unknown>);
+  }
+  async bootState(): Promise<Record<string, unknown>> {
+    return this.wsOnly("boot state", async () => (normalizeDates(await this.call("boot.get_state")) as Record<string, unknown>) ?? {});
+  }
+  async bootEnvironments(): Promise<unknown[]> {
+    return this.wsOnly("boot environments", async () => (normalizeDates(await this.call("boot.environment.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async networkConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("network config", async () => (await this.call("network.configuration.config")) as Record<string, unknown>);
+  }
+  async staticRoutes(): Promise<unknown[]> {
+    return this.wsOnly("static routes", async () => ((await this.call("staticroute.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async sshConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("SSH config", async () => (await this.call("ssh.config")) as Record<string, unknown>);
+  }
+  async snmpConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("SNMP config", async () => (await this.call("snmp.config")) as Record<string, unknown>);
+  }
+  async upsConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("UPS config", async () => (await this.call("ups.config")) as Record<string, unknown>);
+  }
+
+  // ------------------------------------------------------------------
   // Mutations (safe writes). WebSocket-only; gated at the tool layer by
   // TRUENAS_ENABLE_WRITE. Each returns the raw upstream result.
   // ------------------------------------------------------------------

@@ -1842,6 +1842,444 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   // ================================================================
+  // Phase 1: config & inventory reads (always on)
+  // ================================================================
+
+  // ---------------- system config ----------------
+  server.registerTool(
+    "truenas_system_config",
+    {
+      title: "System Configuration",
+      description:
+        "Read core system settings: state, general (timezone, web UI bind/port/HTTPS), advanced (console/serial/" +
+        "syslog/kernel), security (FIPS/STIG/password policy), and which pool holds the system dataset. Secrets " +
+        "(the UI certificate body) are omitted.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        state: z.string().nullable(),
+        general: z.record(z.string(), z.unknown()),
+        advanced: z.record(z.string(), z.unknown()),
+        security: z.record(z.string(), z.unknown()),
+        system_dataset: z.record(z.string(), z.unknown()),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const general = { ...(await client.systemGeneralConfig()) };
+        const cert = general.ui_certificate as { id?: unknown; name?: unknown } | undefined;
+        if (cert && typeof cert === "object") general.ui_certificate = { id: cert.id ?? null, name: cert.name ?? null };
+        const advanced = { ...(await client.systemAdvancedConfig()) };
+        delete advanced.anonstats_token;
+        const security = await client.systemSecurityConfig();
+        const systemDataset = await client.systemDatasetConfig();
+        const state = (await client.systemState()) as string;
+        const structured = { state, general, advanced, security, system_dataset: systemDataset };
+        return respond(structured, response_format, () =>
+          [
+            `**State**: ${state}`,
+            `**Timezone**: ${general.timezone ?? "—"}`,
+            `**System dataset pool**: ${systemDataset.pool ?? "—"}`,
+            `**FIPS**: ${security.enable_fips ? "on" : "off"} · **STIG**: ${security.enable_gpos_stig ? "on" : "off"}`,
+            `**Boot scrub interval**: ${advanced.boot_scrub ?? "—"} days`,
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- init/shutdown scripts ----------------
+  server.registerTool(
+    "truenas_list_init_scripts",
+    {
+      title: "List Init/Shutdown Scripts",
+      description:
+        "List custom Init/Shutdown scripts and commands (System → Advanced → Init/Shutdown Scripts): each with its " +
+        "type (command or script), the command/path, when it runs (PREINIT/POSTINIT/SHUTDOWN), enabled state, and " +
+        "timeout.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        scripts: z.array(
+          z.object({
+            id: z.number().nullable(),
+            type: z.string().nullable(),
+            command: z.string().nullable(),
+            script: z.string().nullable(),
+            when: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+            timeout: z.number().nullable(),
+            comment: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().initScripts()) as Array<Record<string, unknown>>;
+        const scripts = raw.map((s) => ({
+          id: (s.id as number) ?? null,
+          type: (s.type as string) ?? null,
+          command: (s.command as string) ?? null,
+          script: (s.script as string) ?? null,
+          when: (s.when as string) ?? null,
+          enabled: (s.enabled as boolean) ?? null,
+          timeout: (s.timeout as number) ?? null,
+          comment: (s.comment as string) ?? null,
+        }));
+        return respond({ count: scripts.length, scripts }, response_format, () =>
+          scripts.length === 0
+            ? "No custom Init/Shutdown scripts configured."
+            : mdTable(
+                ["When", "Type", "Command / Script", "Enabled", "Comment"],
+                scripts.map((s) => [
+                  s.when,
+                  s.type,
+                  s.type === "COMMAND" ? s.command : s.script,
+                  s.enabled === null ? null : s.enabled ? "yes" : "no",
+                  s.comment,
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- cron jobs ----------------
+  server.registerTool(
+    "truenas_list_cron_jobs",
+    {
+      title: "List Cron Jobs",
+      description: "List scheduled cron jobs (System → Advanced → Cron Jobs) with their command, user, schedule, and enabled state.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({ count: z.number(), jobs: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const jobs = (await getClient().cronJobs()) as Array<Record<string, unknown>>;
+        return respond({ count: jobs.length, jobs }, response_format, () =>
+          jobs.length === 0
+            ? "No cron jobs configured."
+            : mdTable(
+                ["Command", "User", "Schedule", "Enabled"],
+                jobs.map((j) => [
+                  j.command as string,
+                  j.user as string,
+                  cronStr(j.schedule as Parameters<typeof cronStr>[0]),
+                  j.enabled === undefined ? null : j.enabled ? "yes" : "no",
+                ])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- tunables ----------------
+  server.registerTool(
+    "truenas_list_tunables",
+    {
+      title: "List Tunables",
+      description: "List system tunables (sysctl / udev / init) configured under System → Advanced → Sysctl.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({ count: z.number(), tunables: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const tunables = (await getClient().tunables()) as Array<Record<string, unknown>>;
+        return respond({ count: tunables.length, tunables }, response_format, () =>
+          tunables.length === 0
+            ? "No tunables configured."
+            : mdTable(
+                ["Type", "Variable", "Value", "Enabled"],
+                tunables.map((t) => [t.type as string, t.var as string, t.value as string, t.enabled ? "yes" : "no"])
+              )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- NTP servers ----------------
+  server.registerTool(
+    "truenas_list_ntp_servers",
+    {
+      title: "List NTP Time Servers",
+      description: "List the configured NTP time sources with their poll settings.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        servers: z.array(
+          z.object({
+            id: z.number().nullable(),
+            address: z.string().nullable(),
+            burst: z.boolean().nullable(),
+            iburst: z.boolean().nullable(),
+            prefer: z.boolean().nullable(),
+            minpoll: z.number().nullable(),
+            maxpoll: z.number().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().ntpServers()) as Array<Record<string, unknown>>;
+        const servers = raw.map((s) => ({
+          id: (s.id as number) ?? null,
+          address: (s.address as string) ?? null,
+          burst: (s.burst as boolean) ?? null,
+          iburst: (s.iburst as boolean) ?? null,
+          prefer: (s.prefer as boolean) ?? null,
+          minpoll: (s.minpoll as number) ?? null,
+          maxpoll: (s.maxpoll as number) ?? null,
+        }));
+        return respond({ count: servers.length, servers }, response_format, () =>
+          mdTable(
+            ["Address", "iburst", "prefer", "minpoll", "maxpoll"],
+            servers.map((s) => [s.address, s.iburst ? "yes" : "no", s.prefer ? "yes" : "no", s.minpoll, s.maxpoll])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- boot status ----------------
+  server.registerTool(
+    "truenas_boot_status",
+    {
+      title: "Boot Pool & Environments",
+      description:
+        "Report boot-pool health (status, capacity, last scrub) and the list of boot environments — the OS " +
+        "snapshots you can roll back to after a bad update. The active environment is flagged.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        boot_pool: z.object({
+          status: z.string().nullable(),
+          healthy: z.boolean().nullable(),
+          size_bytes: z.number().nullable(),
+          allocated_bytes: z.number().nullable(),
+          free_bytes: z.number().nullable(),
+          fragmentation: z.string().nullable(),
+          last_scrub_errors: z.number().nullable(),
+        }),
+        environments: z.array(
+          z.object({
+            id: z.string().nullable(),
+            active: z.boolean().nullable(),
+            activated: z.boolean().nullable(),
+            created: z.string().nullable(),
+            used: z.string().nullable(),
+            keep: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const bs = (await client.bootState()) as Record<string, unknown>;
+        const scan = bs.scan as { errors?: number } | undefined;
+        const boot_pool = {
+          status: (bs.status as string) ?? null,
+          healthy: (bs.healthy as boolean) ?? null,
+          size_bytes: (bs.size as number) ?? null,
+          allocated_bytes: (bs.allocated as number) ?? null,
+          free_bytes: (bs.free as number) ?? null,
+          fragmentation: (bs.fragmentation as string) ?? null,
+          last_scrub_errors: scan?.errors ?? null,
+        };
+        const rawEnvs = (await client.bootEnvironments()) as Array<Record<string, unknown>>;
+        const environments = rawEnvs.map((e) => ({
+          id: (e.id as string) ?? null,
+          active: (e.active as boolean) ?? null,
+          activated: (e.activated as boolean) ?? null,
+          created: (e.created as string) ?? null,
+          used: (e.used as string) ?? null,
+          keep: (e.keep as boolean) ?? null,
+        }));
+        return respond({ boot_pool, environments }, response_format, () =>
+          [
+            `**Boot pool**: ${boot_pool.status} · ${humanBytes(boot_pool.allocated_bytes)} / ${humanBytes(boot_pool.size_bytes)} used · frag ${boot_pool.fragmentation}%`,
+            "",
+            mdTable(
+              ["Boot environment", "Active", "Keep", "Used", "Created"],
+              environments.map((e) => [
+                e.id,
+                e.active ? "● active" : e.activated ? "next boot" : "",
+                e.keep ? "yes" : "no",
+                e.used,
+                e.created,
+              ])
+            ),
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- network config ----------------
+  server.registerTool(
+    "truenas_get_network_config",
+    {
+      title: "Network Configuration",
+      description:
+        "Read global network configuration — hostname, domain, default gateways, DNS nameservers, host entries, and " +
+        "service announcement (mDNS/NetBIOS/WSD) — plus any static routes. Complements truenas_list_network " +
+        "(per-interface state).",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        config: z.record(z.string(), z.unknown()),
+        static_routes: z.array(z.record(z.string(), z.unknown())),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const config = { ...(await client.networkConfig()) };
+        delete config.state; // duplicate of the top-level fields
+        const static_routes = (await client.staticRoutes()) as Array<Record<string, unknown>>;
+        return respond({ config, static_routes }, response_format, () =>
+          [
+            `**Hostname**: ${config.hostname ?? "—"}${config.domain ? "." + config.domain : ""}`,
+            `**Gateway**: ${config.ipv4gateway ?? "—"}`,
+            `**Nameservers**: ${[config.nameserver1, config.nameserver2, config.nameserver3].filter(Boolean).join(", ") || "—"}`,
+            `**Static routes**: ${static_routes.length}`,
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- service configs (ssh/snmp/ups) ----------------
+  server.registerTool(
+    "truenas_get_service_configs",
+    {
+      title: "Service Daemon Configs (SSH / SNMP / UPS)",
+      description:
+        "Read the configuration of the SSH, SNMP, and UPS services. Secrets (SSH host/private keys, SNMP community " +
+        "and v3 passwords, UPS monitor password) are stripped.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        ssh: z.record(z.string(), z.unknown()),
+        snmp: z.record(z.string(), z.unknown()),
+        ups: z.record(z.string(), z.unknown()),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const ssh = { ...(await client.sshConfig()) };
+        for (const k of [
+          "privatekey",
+          "host_key",
+          "host_key_pub",
+          "host_key_cert_pub",
+          "host_dsa_key",
+          "host_dsa_key_pub",
+          "host_dsa_key_cert_pub",
+          "host_ecdsa_key",
+          "host_ecdsa_key_pub",
+          "host_ecdsa_key_cert_pub",
+          "host_ed25519_key",
+          "host_ed25519_key_pub",
+          "host_ed25519_key_cert_pub",
+          "host_rsa_key",
+          "host_rsa_key_pub",
+          "host_rsa_key_cert_pub",
+        ]) delete ssh[k];
+        const snmp = { ...(await client.snmpConfig()) };
+        for (const k of ["community", "v3_password", "v3_privpassphrase"]) delete snmp[k];
+        const ups = { ...(await client.upsConfig()) };
+        delete ups.monpwd;
+        return respond({ ssh, snmp, ups }, response_format, () =>
+          [
+            `**SSH**: port ${ssh.tcpport ?? "—"}, password auth ${ssh.passwordauth ? "**ENABLED**" : "disabled"}, groups ${(ssh.password_login_groups as string[] | undefined)?.join(", ") || "—"}`,
+            `**SNMP**: ${snmp.location || "(no location)"}, v3 ${snmp.v3 ? "on" : "off"}, traps ${snmp.traps ? "on" : "off"}`,
+            `**UPS**: driver ${ups.driver || "(not configured)"}, mode ${ups.mode}, shutdown ${ups.shutdown}`,
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- notification config (mail + alerts) ----------------
+  server.registerTool(
+    "truenas_get_notification_config",
+    {
+      title: "Notification Config (Email & Alert Services)",
+      description:
+        "Read how alerts are delivered: the outgoing email config (SMTP or Gmail OAuth), the configured alert " +
+        "services (email/Slack/PagerDuty/SNMP-trap/etc.), and any per-class alert level overrides. All secrets " +
+        "(SMTP/OAuth credentials, SNMP keys) are stripped.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        mail: z.record(z.string(), z.unknown()),
+        alert_services: z.array(z.record(z.string(), z.unknown())),
+        alert_class_overrides: z.record(z.string(), z.unknown()),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const mail = { ...(await client.mailConfig()) };
+        delete mail.pass;
+        if (mail.oauth && typeof mail.oauth === "object") {
+          const o = mail.oauth as Record<string, unknown>;
+          mail.oauth = { provider: o.provider ?? null, configured: Boolean(o.client_id) };
+        }
+        const rawSvcs = (await client.alertServices()) as Array<Record<string, unknown>>;
+        const alert_services = rawSvcs.map((s) => {
+          const attrs = { ...((s.attributes as Record<string, unknown>) ?? {}) };
+          for (const k of ["community", "v3_authkey", "v3_privkey", "password", "token", "api_key", "authtoken"]) delete attrs[k];
+          return { id: s.id ?? null, name: s.name ?? null, type: s.type__title ?? null, level: s.level ?? null, enabled: s.enabled ?? null, attributes: attrs };
+        });
+        const classes = (await client.alertClasses()) as { classes?: Record<string, unknown> };
+        return respond(
+          { mail, alert_services, alert_class_overrides: classes.classes ?? {} },
+          response_format,
+          () =>
+            [
+              `**Email**: ${mail.smtp ? `SMTP ${mail.outgoingserver}:${mail.port}` : (mail.oauth as { provider?: string })?.provider ? `OAuth (${(mail.oauth as { provider?: string }).provider})` : "not configured"}, from ${mail.fromemail ?? "—"}`,
+              "",
+              alert_services.length === 0
+                ? "No alert services configured."
+                : mdTable(
+                    ["Service", "Type", "Level", "Enabled"],
+                    alert_services.map((s) => [s.name as string, s.type as string, s.level as string, s.enabled ? "yes" : "no"])
+                  ),
+            ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
   // stderr, and when TRUENAS_TEST_DATASET is set, restricted to that dataset.
