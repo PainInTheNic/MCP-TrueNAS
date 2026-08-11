@@ -75,6 +75,9 @@ the structured result is machine-validated by the MCP client.
 
 **Apps, sharing, backups & VMs** — require TrueNAS 25.04+ (WebSocket API)
 - `truenas_list_apps` — installed apps and whether an app/image **update is available**, plus Docker status
+- `truenas_list_catalog_apps` — browse the catalog of installable apps (filterable); source for `create_app`
+- `truenas_get_app` — one app's state, version, portals, host ports, container/volume counts (raw config omitted for safety)
+- `truenas_list_vm_devices` — a VM's disks, NICs, display, and passthrough devices
 - `truenas_list_shares` — SMB shares, NFS exports, and iSCSI targets in one call
 - `truenas_list_network` — IP addresses, default routes, DNS, and per-interface link state
 - `truenas_list_replication_tasks` — configured ZFS replication (backup) tasks and last-run state
@@ -112,7 +115,9 @@ the structured result is machine-validated by the MCP client.
 - `truenas_control_service` — start / stop / restart / reload a service (smb, nfs, ssh, …)
 - `truenas_set_service_boot` — enable/disable a service starting on boot
 - `truenas_manage_app` — start / stop / redeploy / upgrade / rollback an installed app
+- `truenas_create_app` / `truenas_update_app` — install an app from the catalog; change an app's config values
 - `truenas_manage_vm` — start / stop / restart / suspend / resume a VM
+- `truenas_create_vm` / `truenas_update_vm` — create a VM shell; change its CPU/memory/boot config
 - `truenas_run_scrub` — start a manual pool scrub
 - `truenas_run_cloudsync_task` / `truenas_run_replication_task` / `truenas_run_rsync_task` — trigger an existing backup task now (by id)
 - `truenas_clone_snapshot` — clone a snapshot into a new dataset (non-destructive; great for file recovery)
@@ -148,7 +153,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **37 read, 28 safe-write, 20 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **40 read, 32 safe-write, 20 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

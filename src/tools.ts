@@ -17,7 +17,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { inputRequired, acceptedContent } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { TrueNasClient, TrueNasConfig, TrueNasError } from "./truenas-client.js";
-import type { JobOutcome, RsyncTaskOptions } from "./truenas-client.js";
+import type { JobOutcome, RsyncTaskOptions, VmOptions } from "./truenas-client.js";
 
 interface ToolContext {
   config: TrueNasConfig;
@@ -2790,6 +2790,195 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- catalog apps (installable) ----------------
+  server.registerTool(
+    "truenas_list_catalog_apps",
+    {
+      title: "Browse App Catalog",
+      description:
+        "Browse the catalog of installable apps (the same list the UI's Discover Apps shows). Optionally filter by " +
+        "a search term. Use a name here as 'catalog_app' when calling truenas_create_app.",
+      inputSchema: z.object({
+        search: z.string().optional().describe("Case-insensitive filter on name/title/description"),
+        limit: z.number().int().min(1).max(500).default(50).describe("Max apps to return (default 50)"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        returned: z.number(),
+        apps: z.array(
+          z.object({
+            name: z.string().nullable(),
+            title: z.string().nullable(),
+            train: z.string().nullable(),
+            version: z.string().nullable(),
+            categories: z.array(z.string()),
+            recommended: z.boolean().nullable(),
+            healthy: z.boolean().nullable(),
+            description: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ search, limit, response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().catalogApps()) as Array<Record<string, unknown>>;
+        const q = search?.toLowerCase();
+        const filtered = q
+          ? raw.filter((a) =>
+              [a.name, a.title, a.description].some((f) => typeof f === "string" && f.toLowerCase().includes(q))
+            )
+          : raw;
+        const apps = filtered.slice(0, limit).map((a) => ({
+          name: (a.name as string) ?? null,
+          title: (a.title as string) ?? null,
+          train: (a.train as string) ?? null,
+          version: (a.latest_human_version as string) ?? null,
+          categories: Array.isArray(a.categories) ? (a.categories as string[]) : [],
+          recommended: (a.recommended as boolean) ?? null,
+          healthy: (a.healthy as boolean) ?? null,
+          description: (a.description as string) ?? null,
+        }));
+        return respond({ count: filtered.length, returned: apps.length, apps }, response_format, () =>
+          mdTable(
+            ["Name", "Title", "Train", "Version", "Categories"],
+            apps.map((a) => [a.name, a.title, a.train, a.version, a.categories.join(", ")])
+          ) + `\n\n_${apps.length} of ${filtered.length} matching apps._`
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- installed app detail ----------------
+  server.registerTool(
+    "truenas_get_app",
+    {
+      title: "Get Installed App Detail",
+      description:
+        "Show operational detail for one installed app: state, version, whether an update is available, web portals, " +
+        "used host ports, and container/volume counts. The raw config (which can contain secrets) is deliberately " +
+        "NOT included — view it in the TrueNAS UI.",
+      inputSchema: z.object({
+        app: z.string().describe("Installed app name (see truenas_list_apps)"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        name: z.string().nullable(),
+        state: z.string().nullable(),
+        version: z.string().nullable(),
+        upgrade_available: z.boolean().nullable(),
+        image_updates_available: z.boolean().nullable(),
+        custom_app: z.boolean().nullable(),
+        portals: z.record(z.string(), z.string()),
+        used_ports: z.array(z.string()),
+        container_count: z.number().nullable(),
+        volume_count: z.number().nullable(),
+        notes: z.string().nullable(),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ app, response_format }): Promise<ToolResult> => {
+      try {
+        const a = (await getClient().appInstance(app)) as Record<string, unknown>;
+        const workloads = (a.active_workloads as Record<string, unknown>) ?? {};
+        const portalsRaw = (a.portals as Record<string, string>) ?? {};
+        const usedPortsRaw = Array.isArray(workloads.used_ports) ? (workloads.used_ports as unknown[]) : [];
+        const used_ports = usedPortsRaw.map((p) => {
+          const o = p as { host_ports?: Array<{ host_port?: number; host_ip?: string }>; container_port?: number; protocol?: string };
+          const hosts = (o.host_ports ?? []).map((h) => h.host_port).filter(Boolean).join(",");
+          return `${hosts || "?"}→${o.container_port ?? "?"}/${(o.protocol ?? "tcp").toLowerCase()}`;
+        });
+        const structured = {
+          name: (a.name as string) ?? null,
+          state: (a.state as string) ?? null,
+          version: (a.human_version as string) ?? (a.version as string) ?? null,
+          upgrade_available: (a.upgrade_available as boolean) ?? null,
+          image_updates_available: (a.image_updates_available as boolean) ?? null,
+          custom_app: (a.custom_app as boolean) ?? null,
+          portals: portalsRaw,
+          used_ports,
+          container_count: typeof workloads.containers === "number" ? (workloads.containers as number) : null,
+          volume_count: Array.isArray(workloads.volumes) ? (workloads.volumes as unknown[]).length : null,
+          notes: (a.notes as string) ?? null,
+        };
+        return respond(structured, response_format, () =>
+          [
+            `**${structured.name}** — ${structured.state} · ${structured.version}`,
+            `Update available: app ${structured.upgrade_available ? "yes" : "no"}, image ${structured.image_updates_available ? "yes" : "no"}`,
+            Object.keys(structured.portals).length
+              ? "Portals: " + Object.entries(structured.portals).map(([k, v]) => `${k} → ${v}`).join(", ")
+              : "",
+            structured.used_ports.length ? "Ports: " + structured.used_ports.join(", ") : "",
+            `Containers: ${structured.container_count ?? "?"}, Volumes: ${structured.volume_count ?? "?"}`,
+          ]
+            .filter(Boolean)
+            .join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- VM devices ----------------
+  server.registerTool(
+    "truenas_list_vm_devices",
+    {
+      title: "List VM Devices",
+      description:
+        "List the devices attached to a virtual machine (disks, NICs, display, CD-ROM, PCI passthrough) with a short " +
+        "summary of each. Use with truenas_list_vms to inspect a VM's hardware.",
+      inputSchema: z.object({
+        vm_id: z.number().int().describe("VM id (see truenas_list_vms)"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        vm_id: z.number(),
+        count: z.number(),
+        devices: z.array(
+          z.object({
+            id: z.number().nullable(),
+            type: z.string().nullable(),
+            order: z.number().nullable(),
+            summary: z.string().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ vm_id, response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().vmDevices(vm_id)) as Array<Record<string, unknown>>;
+        const devices = raw.map((d) => {
+          const at = (d.attributes as Record<string, unknown>) ?? {};
+          const type = (at.dtype as string) ?? null;
+          let summary: string | null = null;
+          switch (type) {
+            case "DISK": summary = `${at.path ?? "?"} (${at.type ?? "?"})`; break;
+            case "CDROM": summary = String(at.path ?? "?"); break;
+            case "NIC": summary = `${at.type ?? "?"} on ${at.nic_attach ?? "?"}${at.mac ? ` (${at.mac})` : ""}`; break;
+            case "DISPLAY": summary = `${at.type ?? "?"} :${at.port ?? "?"}`; break;
+            case "PCI": summary = String(at.pptdev ?? "?"); break;
+            case "RAW": summary = String(at.path ?? "?"); break;
+            default: summary = type ? String(type) : null;
+          }
+          return { id: (d.id as number) ?? null, type, order: (d.order as number) ?? null, summary };
+        });
+        return respond({ vm_id, count: devices.length, devices }, response_format, () =>
+          mdTable(
+            ["Type", "Summary", "Order"],
+            devices.map((d) => [d.type, d.summary, d.order])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
@@ -3855,6 +4044,164 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated rsync task ${id}.`);
         } catch (error) {
           auditLog({ tool: "truenas_update_rsync_task", method: "rsynctask.update", target: `rsync:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ================================================================
+    // App & VM provisioning (Phase 3).
+    // ================================================================
+
+    // ---------------- create app (install from catalog) ----------------
+    server.registerTool(
+      "truenas_create_app",
+      {
+        title: "Install an App from the Catalog",
+        description:
+          "Install an app from the catalog (see truenas_list_catalog_apps for names). Runs as a job. 'values' is the " +
+          "app's config object (same keys the UI install form uses); omit it to accept catalog defaults. A reversible " +
+          "action — the app can be stopped or deleted later. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          app_name: z.string().describe("Name for the new app instance, e.g. 'photoprism'"),
+          catalog_app: z.string().describe("Catalog app to install, e.g. 'photoprism' (from truenas_list_catalog_apps)"),
+          train: z.string().default("stable").describe("Catalog train: stable | enterprise | community"),
+          version: z.string().optional().describe("Specific version (defaults to latest)"),
+          values: z.record(z.string(), z.unknown()).optional().describe("App config values object (optional; defaults used if omitted)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ app_name: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ app_name, catalog_app, train, version, values, response_format }): Promise<ToolResult> => {
+        try {
+          const out = await getClient().createApp({ app_name, catalog_app, train, version, values });
+          auditLog({ tool: "truenas_create_app", method: "app.create", target: app_name, outcome: out.error ? `error: ${out.error}` : out.state });
+          const structured = { app_name, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error
+              ? `Installing **${app_name}** failed: ${out.error}`
+              : `App **${app_name}** (${catalog_app}) → **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""}.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_app", method: "app.create", target: app_name, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- update app config ----------------
+    server.registerTool(
+      "truenas_update_app",
+      {
+        title: "Update an App's Config",
+        description:
+          "Change an installed app's configuration values (the same keys shown in the app's Edit form). Runs as a job " +
+          "and redeploys the app. Supply the full 'values' object for the keys you are changing. Requires " +
+          "TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          app: z.string().describe("Installed app name (see truenas_list_apps)"),
+          values: z.record(z.string(), z.unknown()).describe("Config values to apply"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ app: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ app, values, response_format }): Promise<ToolResult> => {
+        try {
+          const out = await getClient().updateApp(app, values);
+          auditLog({ tool: "truenas_update_app", method: "app.update", target: app, outcome: out.error ? `error: ${out.error}` : out.state });
+          const structured = { app, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error ? `Updating **${app}** failed: ${out.error}` : `App **${app}** updated → **${out.state}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_update_app", method: "app.update", target: app, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---------------- create / update VM ----------------
+    const vmFields = {
+      description: z.string().optional(),
+      vcpus: z.number().int().min(1).optional().describe("Virtual CPU sockets"),
+      cores: z.number().int().min(1).optional(),
+      threads: z.number().int().min(1).optional(),
+      min_memory: z.number().int().min(64).optional().describe("Ballooning minimum RAM in MiB"),
+      autostart: z.boolean().optional().describe("Start automatically on boot"),
+      bootloader: z.enum(["UEFI", "UEFI_CSM"]).optional(),
+      shutdown_timeout: z.number().int().min(0).optional(),
+      time: z.enum(["LOCAL", "UTC"]).optional(),
+      cpu_mode: z.enum(["CUSTOM", "HOST-MODEL", "HOST-PASSTHROUGH"]).optional(),
+    };
+    const toVmOpts = (a: Record<string, unknown>): VmOptions => {
+      const o: VmOptions = {};
+      for (const k of ["name", "description", "vcpus", "cores", "threads", "memory", "min_memory", "autostart", "bootloader", "shutdown_timeout", "time", "cpu_mode"] as const) {
+        if (a[k] !== undefined) (o as Record<string, unknown>)[k] = a[k];
+      }
+      return o;
+    };
+
+    server.registerTool(
+      "truenas_create_vm",
+      {
+        title: "Create a Virtual Machine",
+        description:
+          "Create a VM shell (CPU/memory/boot config). Disks, NICs, and a display are added separately (in the UI or " +
+          "via the VM devices API) before the VM is useful. A reversible action — the VM can be deleted later. " +
+          "Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          name: z.string().describe("VM name, e.g. 'test-vm'"),
+          memory: z.number().int().min(64).describe("RAM in MiB (required), e.g. 2048"),
+          ...vmFields,
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable(), name: z.string() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { name, response_format } = args as { name: string; response_format?: "markdown" | "json" };
+        try {
+          const raw = (await getClient().createVm(toVmOpts(args as Record<string, unknown>))) as { id?: number };
+          auditLog({ tool: "truenas_create_vm", method: "vm.create", target: name, outcome: "success" });
+          return respond({ created: true, id: raw?.id ?? null, name }, response_format ?? "markdown", () =>
+            `Created VM **${name}**${raw?.id ? ` (id ${raw.id})` : ""}. Add disks/NIC/display before starting it.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_vm", method: "vm.create", target: name, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    server.registerTool(
+      "truenas_update_vm",
+      {
+        title: "Update a Virtual Machine's Config",
+        description:
+          "Update an existing VM's config (name, vcpus/cores/threads, memory, autostart, bootloader, etc.). Supply " +
+          "only the fields to change; the VM should be stopped for CPU/memory changes. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("VM id (see truenas_list_vms)"),
+          name: z.string().optional().describe("New VM name"),
+          memory: z.number().int().min(64).optional().describe("RAM in MiB"),
+          ...vmFields,
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { id, response_format } = args as { id: number; response_format?: "markdown" | "json" };
+        try {
+          const opts = toVmOpts(args as Record<string, unknown>);
+          if (Object.keys(opts).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateVm(id, opts);
+          auditLog({ tool: "truenas_update_vm", method: "vm.update", target: `vm:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated VM ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_vm", method: "vm.update", target: `vm:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
           return errorResult(error);
         }
       }

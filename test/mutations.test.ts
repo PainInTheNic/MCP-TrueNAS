@@ -313,3 +313,39 @@ test("deleteRsyncTask / deleteCloudsyncTask / deleteReplicationTask send delete 
     ["replication.delete", [3]],
   ]);
 });
+
+// ---------------- Phase 3: app & VM provisioning ----------------
+
+test("createApp sends app.create with app_name+catalog_app and only provided optionals", async () => {
+  const { client, calls } = stubClient();
+  await client.createApp({ app_name: "pp", catalog_app: "photoprism", train: "stable", values: { x: 1 } });
+  assert.equal(calls[0].method, "app.create");
+  assert.deepEqual(calls[0].params, [{ app_name: "pp", catalog_app: "photoprism", train: "stable", values: { x: 1 } }]);
+});
+
+test("createApp omits train/version/values when not provided", async () => {
+  const { client, calls } = stubClient();
+  await client.createApp({ app_name: "pp", catalog_app: "photoprism" });
+  assert.deepEqual(calls[0].params, [{ app_name: "pp", catalog_app: "photoprism" }]);
+});
+
+test("updateApp sends app.update with [name, {values}]", async () => {
+  const { client, calls } = stubClient();
+  await client.updateApp("grafana", { foo: "bar" });
+  assert.equal(calls[0].method, "app.update");
+  assert.deepEqual(calls[0].params, ["grafana", { values: { foo: "bar" } }]);
+});
+
+test("createVm sends vm.create including only provided fields", async () => {
+  const { client, calls } = stubClient();
+  await client.createVm({ name: "testvm", memory: 2048, vcpus: 2, autostart: false });
+  assert.equal(calls[0].method, "vm.create");
+  assert.deepEqual(calls[0].params, [{ name: "testvm", memory: 2048, vcpus: 2, autostart: false }]);
+});
+
+test("updateVm sends vm.update with [id, partial-data]", async () => {
+  const { client, calls } = stubClient();
+  await client.updateVm(17, { vcpus: 4, description: "hi" });
+  assert.equal(calls[0].method, "vm.update");
+  assert.deepEqual(calls[0].params, [17, { vcpus: 4, description: "hi" }]);
+});

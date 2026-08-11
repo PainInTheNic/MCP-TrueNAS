@@ -84,6 +84,22 @@ export interface RsyncTaskOptions {
   schedule?: Record<string, string>;
 }
 
+/** Typed options for vm.create / vm.update (assembled in vmPayload). */
+export interface VmOptions {
+  name?: string;
+  description?: string;
+  vcpus?: number;
+  cores?: number;
+  threads?: number;
+  memory?: number;
+  min_memory?: number;
+  autostart?: boolean;
+  bootloader?: "UEFI" | "UEFI_CSM";
+  shutdown_timeout?: number;
+  time?: "LOCAL" | "UTC";
+  cpu_mode?: "CUSTOM" | "HOST-MODEL" | "HOST-PASSTHROUGH";
+}
+
 class JsonRpcError extends Error {
   constructor(
     readonly code: number,
@@ -1050,6 +1066,61 @@ export class TrueNasClient {
   }
 
   // ------------------------------------------------------------------
+  // App & VM provisioning (Phase 3).
+  // ------------------------------------------------------------------
+
+  /** app.available — browse the catalog of installable apps. */
+  async catalogApps(): Promise<unknown[]> {
+    return this.wsOnly(
+      "catalog",
+      async () =>
+        ((await this.call("app.available", [
+          [],
+          {
+            select: [
+              "name", "title", "description", "categories", "tags", "latest_version",
+              "latest_human_version", "recommended", "healthy", "home", "train",
+            ],
+            order_by: ["title"],
+          },
+        ])) as unknown[]) ?? []
+    );
+  }
+
+  /** app.get_instance — full detail for one installed app. */
+  async appInstance(name: string): Promise<unknown> {
+    return this.wsOnly("app instance", () => this.call("app.get_instance", [name]));
+  }
+
+  /** vm.device.query — devices attached to a VM. */
+  async vmDevices(vmId: number): Promise<unknown[]> {
+    return this.wsOnly(
+      "vm devices",
+      async () => ((await this.call("vm.device.query", [[["vm", "=", vmId]], {}])) as unknown[]) ?? []
+    );
+  }
+
+  /** app.create — install an app from the catalog (runs as a @job). */
+  async createApp(opts: {
+    app_name: string;
+    catalog_app: string;
+    train?: string;
+    version?: string;
+    values?: Record<string, unknown>;
+  }): Promise<JobOutcome> {
+    const data: Record<string, unknown> = { app_name: opts.app_name, catalog_app: opts.catalog_app };
+    if (opts.train !== undefined) data.train = opts.train;
+    if (opts.version !== undefined) data.version = opts.version;
+    if (opts.values !== undefined) data.values = opts.values;
+    return this.wsOnly("app create", () => this.callJob("app.create", [data]));
+  }
+
+  /** app.update — change an installed app's config values (runs as a @job). */
+  async updateApp(name: string, values: Record<string, unknown>): Promise<JobOutcome> {
+    return this.wsOnly("app update", () => this.callJob("app.update", [name, { values }]));
+  }
+
+  // ------------------------------------------------------------------
   // Provisioning (create/update). All WebSocket-only and synchronous. The
   // typed option objects are assembled into the API payload HERE (not in the
   // tool handlers) so the exact params are unit-testable.
@@ -1079,6 +1150,27 @@ export class TrueNasClient {
     const data: Record<string, unknown> = { new_name: newName };
     if (recursive !== undefined) data.recursive = recursive;
     return this.provision("pool.dataset.rename", [id, data]);
+  }
+
+  /** vm.create — create a virtual machine shell (add devices separately in the UI/API). */
+  async createVm(opts: VmOptions): Promise<unknown> {
+    return this.provision("vm.create", [this.vmPayload(opts)]);
+  }
+
+  /** vm.update — change an existing VM's config. */
+  async updateVm(id: number, opts: VmOptions): Promise<unknown> {
+    return this.provision("vm.update", [id, this.vmPayload(opts)]);
+  }
+
+  /** Assemble a vm.create / vm.update payload from typed options. */
+  private vmPayload(opts: VmOptions): Record<string, unknown> {
+    const data: Record<string, unknown> = {};
+    const copy: (keyof VmOptions)[] = [
+      "name", "description", "vcpus", "cores", "threads", "memory", "min_memory",
+      "autostart", "bootloader", "shutdown_timeout", "time", "cpu_mode",
+    ];
+    for (const k of copy) if (opts[k] !== undefined) data[k] = opts[k];
+    return data;
   }
 
   async createSmbShare(opts: {
