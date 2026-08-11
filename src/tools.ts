@@ -2279,6 +2279,449 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- certificates ----------------
+  server.registerTool(
+    "truenas_list_certificates",
+    {
+      title: "List TLS Certificates",
+      description:
+        "List the TLS certificates in the system store (used for the web UI and services) with common name, SANs, " +
+        "and validity dates. Certificate bodies and private keys are never included.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        certificates: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            common_name: z.string().nullable(),
+            san: z.array(z.string()),
+            from: z.string().nullable(),
+            until: z.string().nullable(),
+            expired: z.boolean().nullable(),
+            revoked: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().certificates()) as Array<Record<string, unknown>>;
+        const certificates = raw.map((c) => ({
+          id: (c.id as number) ?? null,
+          name: (c.name as string) ?? null,
+          common_name: (c.common as string) ?? null,
+          san: Array.isArray(c.san) ? (c.san as string[]) : [],
+          from: (c.from as string) ?? null,
+          until: (c.until as string) ?? null,
+          expired: (c.expired as boolean) ?? null,
+          revoked: (c.revoked as boolean) ?? null,
+        }));
+        return respond({ count: certificates.length, certificates }, response_format, () =>
+          mdTable(
+            ["Name", "Common name", "Valid until", "Expired"],
+            certificates.map((c) => [c.name, c.common_name, c.until, c.expired ? "yes" : "no"])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- API keys ----------------
+  server.registerTool(
+    "truenas_list_api_keys",
+    {
+      title: "List API Keys",
+      description:
+        "List programmatic API keys with their name, linked user, creation/expiry, and revoked state. The key " +
+        "material/hash is never included. Useful for auditing which integrations can reach the box.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        count: z.number(),
+        keys: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            username: z.string().nullable(),
+            created_at: z.string().nullable(),
+            expires_at: z.string().nullable(),
+            local: z.boolean().nullable(),
+            revoked: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const raw = (await getClient().apiKeys()) as Array<Record<string, unknown>>;
+        const keys = raw.map((k) => ({
+          id: (k.id as number) ?? null,
+          name: (k.name as string) ?? null,
+          username: (k.username as string) ?? null,
+          created_at: (k.created_at as string) ?? null,
+          expires_at: (k.expires_at as string) ?? null,
+          local: (k.local as boolean) ?? null,
+          revoked: (k.revoked as boolean) ?? null,
+        }));
+        return respond({ count: keys.length, keys }, response_format, () =>
+          mdTable(
+            ["Name", "User", "Expires", "Revoked"],
+            keys.map((k) => [k.name, k.username, k.expires_at ?? "never", k.revoked ? "yes" : "no"])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- sessions ----------------
+  server.registerTool(
+    "truenas_list_sessions",
+    {
+      title: "Current Identity & Active Sessions",
+      description:
+        "Show the identity this server is authenticated as, plus all active API/UI sessions with their source IP, " +
+        "credential type, and login time. Good for 'who/what is connected to my NAS right now?'.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        current_user: z.object({
+          username: z.string().nullable(),
+          uid: z.number().nullable(),
+          source: z.string().nullable(),
+          local: z.boolean().nullable(),
+        }),
+        sessions: z.array(
+          z.object({
+            id: z.string().nullable(),
+            current: z.boolean().nullable(),
+            origin: z.string().nullable(),
+            credentials: z.string().nullable(),
+            username: z.string().nullable(),
+            api_key: z.string().nullable(),
+            created_at: z.string().nullable(),
+            secure_transport: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const me = (await client.authMe()) as Record<string, unknown>;
+        const current_user = {
+          username: (me.pw_name as string) ?? null,
+          uid: (me.pw_uid as number) ?? null,
+          source: (me.source as string) ?? null,
+          local: (me.local as boolean) ?? null,
+        };
+        const raw = (await client.authSessions()) as Array<Record<string, unknown>>;
+        const sessions = raw.map((s) => {
+          const cd = (s.credentials_data as Record<string, unknown>) ?? {};
+          const apiKey = cd.api_key as { name?: string } | undefined;
+          return {
+            id: (s.id as string) ?? null,
+            current: (s.current as boolean) ?? null,
+            origin: (s.origin as string) ?? null,
+            credentials: (s.credentials as string) ?? null,
+            username: (cd.username as string) ?? null,
+            api_key: apiKey?.name ?? null,
+            created_at: (s.created_at as string) ?? null,
+            secure_transport: (s.secure_transport as boolean) ?? null,
+          };
+        });
+        return respond({ current_user, sessions }, response_format, () =>
+          [
+            `**Authenticated as**: ${current_user.username} (${current_user.source})`,
+            "",
+            mdTable(
+              ["Origin", "Credential", "User / Key", "Since", "TLS"],
+              sessions.map((s) => [
+                `${s.origin}${s.current ? " (this)" : ""}`,
+                s.credentials,
+                s.api_key ?? s.username,
+                s.created_at,
+                s.secure_transport ? "yes" : "no",
+              ])
+            ),
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- privileges (RBAC) ----------------
+  server.registerTool(
+    "truenas_list_privileges",
+    {
+      title: "List Privileges (RBAC)",
+      description:
+        "List privilege grants that map local/directory groups to roles (e.g. FULL_ADMIN, READONLY_ADMIN), plus a " +
+        "count of assignable roles. Shows who has administrative access and at what level.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        roles_available: z.number(),
+        count: z.number(),
+        privileges: z.array(
+          z.object({
+            id: z.number().nullable(),
+            name: z.string().nullable(),
+            builtin_name: z.string().nullable(),
+            roles: z.array(z.string()),
+            local_groups: z.array(z.string()),
+            ds_groups: z.array(z.string()),
+            web_shell: z.boolean().nullable(),
+          })
+        ),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const raw = (await client.privileges()) as Array<Record<string, unknown>>;
+        const roles = (await client.privilegeRoles()) as unknown[];
+        const privileges = raw.map((p) => ({
+          id: (p.id as number) ?? null,
+          name: (p.name as string) ?? null,
+          builtin_name: (p.builtin_name as string) ?? null,
+          roles: Array.isArray(p.roles) ? (p.roles as string[]) : [],
+          local_groups: Array.isArray(p.local_groups)
+            ? (p.local_groups as Array<{ name?: string }>).map((g) => g.name ?? "?")
+            : [],
+          ds_groups: Array.isArray(p.ds_groups)
+            ? (p.ds_groups as Array<{ name?: string }>).map((g) => g.name ?? "?")
+            : [],
+          web_shell: (p.web_shell as boolean) ?? null,
+        }));
+        return respond({ roles_available: roles.length, count: privileges.length, privileges }, response_format, () =>
+          mdTable(
+            ["Privilege", "Roles", "Groups", "Shell"],
+            privileges.map((p) => [
+              p.name,
+              p.roles.join(", "),
+              [...p.local_groups, ...p.ds_groups].join(", "),
+              p.web_shell ? "yes" : "no",
+            ])
+          )
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- directory services ----------------
+  server.registerTool(
+    "truenas_get_directory_services",
+    {
+      title: "Directory Services Status",
+      description:
+        "Report Active Directory / LDAP / IPA configuration and join status (whether the NAS is bound to a domain). " +
+        "Bind credentials are stripped.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({ config: z.record(z.string(), z.unknown()), status: z.record(z.string(), z.unknown()) }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const config = { ...(await client.directoryServicesConfig()) };
+        delete config.credential; // may hold a bind password / keytab
+        const status = await client.directoryServicesStatus();
+        return respond({ config, status }, response_format, () =>
+          config.enable
+            ? `**Directory services**: ${config.service_type ?? "?"} — status ${status.status ?? "?"}`
+            : "Directory services are **disabled** (not joined to AD/LDAP/IPA)."
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- hardware / IPMI ----------------
+  server.registerTool(
+    "truenas_get_hardware",
+    {
+      title: "Hardware / BMC Status",
+      description:
+        "Report IPMI/BMC (lights-out) presence and chassis status (power state, intrusion, fan/drive fault, restore " +
+        "policy), plus any enclosure/backplane mapping if present.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        ipmi_loaded: z.boolean(),
+        chassis: z.record(z.string(), z.unknown()).nullable(),
+        enclosures: z.array(z.record(z.string(), z.unknown())),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const ipmi_loaded = await client.ipmiLoaded();
+        let chassis: Record<string, unknown> | null = null;
+        if (ipmi_loaded) {
+          try {
+            chassis = await client.ipmiChassis();
+          } catch {
+            // BMC present but chassis read failed; leave null
+          }
+        }
+        const enclosures = (await client.enclosures()) as Array<Record<string, unknown>>;
+        return respond({ ipmi_loaded, chassis, enclosures }, response_format, () =>
+          [
+            `**IPMI/BMC**: ${ipmi_loaded ? "present" : "not present"}`,
+            chassis ? `**Power**: ${chassis.system_power} · **Intrusion**: ${chassis.chassis_intrusion} · **Restore policy**: ${chassis.power_restore_policy}` : "",
+            `**Enclosures**: ${enclosures.length}`,
+          ]
+            .filter(Boolean)
+            .join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- dependency checks (pre-destructive) ----------------
+  server.registerTool(
+    "truenas_check_dependencies",
+    {
+      title: "Check Dataset Dependencies",
+      description:
+        "Before deleting or locking a dataset, list what depends on it: attached tasks/shares (snapshot tasks, SMB/" +
+        "NFS shares, replication) and running processes (VMs, apps) holding it open. Use this to avoid breaking a " +
+        "live service.",
+      inputSchema: z.object({
+        dataset: z.string().describe("Dataset id / full path, e.g. 'SSD/PostgreSQL'"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        dataset: z.string(),
+        attachments: z.array(z.object({ type: z.string().nullable(), service: z.string().nullable(), items: z.array(z.string()) })),
+        processes: z.array(z.object({ pid: z.number().nullable(), name: z.string().nullable(), service: z.string().nullable() })),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ dataset, response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const rawA = (await client.datasetAttachments(dataset)) as Array<Record<string, unknown>>;
+        const attachments = rawA.map((a) => ({
+          type: (a.type as string) ?? null,
+          service: (a.service as string) ?? null,
+          items: Array.isArray(a.attachments) ? (a.attachments as string[]) : [],
+        }));
+        const rawP = (await client.datasetProcesses(dataset)) as Array<Record<string, unknown>>;
+        const processes = rawP.map((p) => ({
+          pid: (p.pid as number) ?? null,
+          name: (p.name as string) ?? null,
+          service: (p.service as string) ?? null,
+        }));
+        return respond({ dataset, attachments, processes }, response_format, () =>
+          [
+            `Dependencies of **${dataset}**:`,
+            attachments.length
+              ? "\n**Attached tasks/shares:**\n" + attachments.map((a) => `- ${a.type}${a.service ? ` (${a.service})` : ""}: ${a.items.join(", ")}`).join("\n")
+              : "\n_No attached tasks or shares._",
+            processes.length
+              ? "\n**Running processes holding it open:**\n" + processes.map((p) => `- ${p.name} (pid ${p.pid})`).join("\n")
+              : "\n_No processes holding it open._",
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- filesystem browse ----------------
+  server.registerTool(
+    "truenas_browse_path",
+    {
+      title: "Browse Filesystem Path",
+      description:
+        "List a directory under the NAS filesystem (e.g. /mnt/POOL/dataset) and show the path's metadata, and " +
+        "optionally its ACL. Read-only directory browsing for inspecting datasets and permissions.",
+      inputSchema: z.object({
+        path: z.string().default("/mnt").describe("Absolute path to inspect, e.g. '/mnt/SSD'"),
+        include_acl: z.boolean().default(false).describe("Also fetch the path's ACL"),
+        response_format: responseFormat,
+      }),
+      outputSchema: z.object({
+        path: z.string(),
+        stat: z.record(z.string(), z.unknown()),
+        acl: z.record(z.string(), z.unknown()).nullable(),
+        entries: z.array(z.object({ name: z.string().nullable(), type: z.string().nullable(), path: z.string().nullable() })),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ path, include_acl, response_format }): Promise<ToolResult> => {
+      try {
+        const client = getClient();
+        const stat = await client.fsStat(path);
+        const rawEntries = (await client.fsListdir(path)) as Array<Record<string, unknown>>;
+        const entries = rawEntries.map((e) => ({
+          name: (e.name as string) ?? null,
+          type: (e.type as string) ?? null,
+          path: (e.path as string) ?? null,
+        }));
+        let acl: Record<string, unknown> | null = null;
+        if (include_acl) {
+          try {
+            acl = await client.fsGetacl(path);
+          } catch {
+            acl = null;
+          }
+        }
+        return respond({ path, stat, acl, entries }, response_format, () =>
+          [
+            `**${path}** (${stat.type}, ${entries.length} entries)`,
+            "",
+            mdTable(
+              ["Name", "Type"],
+              entries.map((e) => [e.name, e.type])
+            ),
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- disk temperature alerts ----------------
+  server.registerTool(
+    "truenas_disk_temperature_alerts",
+    {
+      title: "Disk Temperature Alerts",
+      description:
+        "Report current per-disk temperature alerts (disks running hotter than their configured threshold). On " +
+        "25.10 this is the primary disk-health telemetry (SMART self-tests were removed).",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({ count: z.number(), alerts: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const alerts = (await getClient().diskTempAlerts()) as Array<Record<string, unknown>>;
+        return respond({ count: alerts.length, alerts }, response_format, () =>
+          alerts.length === 0 ? "No disk temperature alerts — all disks within threshold." : JSON.stringify(alerts, null, 2)
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to

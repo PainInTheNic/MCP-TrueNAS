@@ -83,6 +83,28 @@ the structured result is machine-validated by the MCP client.
 - `truenas_list_scrub_tasks` — scheduled pool scrub tasks
 - `truenas_list_vms` — virtual machines, run state, and resource allocation
 
+**System configuration & inventory (read)**
+- `truenas_system_config` — general/advanced/security/system-dataset settings and current system state
+- `truenas_boot_status` — boot pool health and boot environments (rollback targets)
+- `truenas_list_ntp_servers` — configured time sources
+- `truenas_list_init_scripts` — custom init/shutdown scripts (command & script hooks)
+- `truenas_list_cron_jobs` — user cron jobs with schedule and enabled state
+- `truenas_list_tunables` — sysctl / kernel / rc tunables
+- `truenas_get_network_config` — global network config, static routes, and SSH bind settings (SSH keys stripped)
+- `truenas_get_service_configs` — SSH, SNMP, and UPS service configuration (community strings, v3 & UPS passwords stripped)
+- `truenas_get_notification_config` — email settings, alert services, and alert-class levels (mail password/OAuth stripped)
+
+**Identity, hardware & filesystem (read)**
+- `truenas_list_certificates` — TLS certificates with validity dates (bodies & keys never shown)
+- `truenas_list_api_keys` — programmatic API keys, linked user, expiry (key hash never shown)
+- `truenas_list_sessions` — who this server authenticates as, plus all active API/UI sessions
+- `truenas_list_privileges` — RBAC: which groups map to which admin roles
+- `truenas_get_directory_services` — Active Directory / LDAP / IPA join status (bind creds stripped)
+- `truenas_get_hardware` — IPMI/BMC presence, chassis status, and enclosure mapping
+- `truenas_check_dependencies` — what tasks/shares/processes depend on a dataset (pre-delete safety)
+- `truenas_browse_path` — read-only directory listing with stat and optional ACL
+- `truenas_disk_temperature_alerts` — disks running over their temperature threshold
+
 **Writes (opt-in — set `TRUENAS_ENABLE_WRITE=1`)** — reversible, non-destructive; never marked read-only (so a client won't auto-run them); every call is audit-logged to stderr:
 - `truenas_create_snapshot` — take a ZFS snapshot of a dataset (optionally recursive)
 - `truenas_update_dataset` — change dataset properties (comment, compression, readonly, atime, sync, quota)
@@ -121,7 +143,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **18 read, 22 safe-write, 17 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **36 read, 22 safe-write, 17 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

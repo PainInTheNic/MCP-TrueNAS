@@ -828,6 +828,66 @@ export class TrueNasClient {
     return this.wsOnly("UPS config", async () => (await this.call("ups.config")) as Record<string, unknown>);
   }
 
+  async certificates(): Promise<unknown[]> {
+    return this.wsOnly("certificates", async () => ((await this.call("certificate.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async apiKeys(): Promise<unknown[]> {
+    return this.wsOnly("API keys", async () => (normalizeDates(await this.call("api_key.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async authMe(): Promise<Record<string, unknown>> {
+    return this.wsOnly("current identity", async () => (await this.call("auth.me")) as Record<string, unknown>);
+  }
+  async authSessions(): Promise<unknown[]> {
+    return this.wsOnly("sessions", async () => (normalizeDates(await this.call("auth.sessions", [[], {}])) as unknown[]) ?? []);
+  }
+  async privileges(): Promise<unknown[]> {
+    return this.wsOnly("privileges", async () => ((await this.call("privilege.query", [[], {}])) as unknown[]) ?? []);
+  }
+  async privilegeRoles(): Promise<unknown[]> {
+    return this.wsOnly("roles", async () => ((await this.call("privilege.roles", [[], {}])) as unknown[]) ?? []);
+  }
+  async directoryServicesConfig(): Promise<Record<string, unknown>> {
+    return this.wsOnly("directory services", async () => (await this.call("directoryservices.config")) as Record<string, unknown>);
+  }
+  async directoryServicesStatus(): Promise<Record<string, unknown>> {
+    return this.wsOnly("directory services status", async () => (await this.call("directoryservices.status")) as Record<string, unknown>);
+  }
+  async ipmiLoaded(): Promise<boolean> {
+    return this.wsOnly("IPMI presence", async () => Boolean(await this.call("ipmi.is_loaded")));
+  }
+  async ipmiChassis(): Promise<Record<string, unknown>> {
+    return this.wsOnly("IPMI chassis", async () => (await this.call("ipmi.chassis.info")) as Record<string, unknown>);
+  }
+  async enclosures(): Promise<unknown[]> {
+    return this.wsOnly("enclosures", async () => ((await this.call("enclosure2.query", [[], {}])) as unknown[]) ?? []);
+  }
+  /** Tasks/shares that depend on a dataset (pool.dataset.attachments). */
+  async datasetAttachments(id: string): Promise<unknown[]> {
+    return this.wsOnly("dataset attachments", async () => ((await this.call("pool.dataset.attachments", [id])) as unknown[]) ?? []);
+  }
+  /** Running processes using a dataset (pool.dataset.processes). */
+  async datasetProcesses(id: string): Promise<unknown[]> {
+    return this.wsOnly("dataset processes", async () => ((await this.call("pool.dataset.processes", [id])) as unknown[]) ?? []);
+  }
+  async fsListdir(path: string): Promise<unknown[]> {
+    return this.wsOnly("directory listing", async () => ((await this.call("filesystem.listdir", [path])) as unknown[]) ?? []);
+  }
+  async fsStat(path: string): Promise<Record<string, unknown>> {
+    return this.wsOnly("path stat", async () => (await this.call("filesystem.stat", [path])) as Record<string, unknown>);
+  }
+  async fsGetacl(path: string): Promise<Record<string, unknown>> {
+    return this.wsOnly("path ACL", async () => (await this.call("filesystem.getacl", [path])) as Record<string, unknown>);
+  }
+  /** Current disk-temperature alerts (disk.temperature_alerts needs an explicit name list). */
+  async diskTempAlerts(): Promise<unknown[]> {
+    return this.wsOnly("disk temperature alerts", async () => {
+      const disks = (await this.disks()) as { name?: string }[];
+      const names = disks.map((d) => d.name).filter((n): n is string => typeof n === "string" && n.length > 0);
+      if (names.length === 0) return [];
+      return ((await this.call("disk.temperature_alerts", [names])) as unknown[]) ?? [];
+    });
+  }
+
   // ------------------------------------------------------------------
   // Mutations (safe writes). WebSocket-only; gated at the tool layer by
   // TRUENAS_ENABLE_WRITE. Each returns the raw upstream result.
