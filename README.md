@@ -82,6 +82,8 @@ the structured result is machine-validated by the MCP client.
 - `truenas_get_app` — one app's state, version, portals, host ports, container/volume counts (raw config omitted for safety)
 - `truenas_list_vm_devices` — a VM's disks, NICs, display, and passthrough devices
 - `truenas_list_shares` — SMB shares, NFS exports, and iSCSI targets in one call
+- `truenas_iscsi_overview` — full iSCSI config: targets, extents, LUN maps, portals, initiators, CHAP (secrets stripped)
+- `truenas_nvme_overview` — full NVMe-oF config: subsystems, namespaces, ports, hosts, and their links
 - `truenas_list_network` — IP addresses, default routes, DNS, and per-interface link state
 - `truenas_list_replication_tasks` — configured ZFS replication (backup) tasks and last-run state
 - `truenas_list_cloudsync_tasks` — cloud backup tasks (S3/Drive/B2/…); credentials never shown
@@ -132,6 +134,8 @@ the structured result is machine-validated by the MCP client.
 - `truenas_hold_snapshot` / `truenas_release_snapshot` — protect a snapshot from deletion, then release it
 - `truenas_create_smb_share` / `truenas_update_smb_share` — SMB shares
 - `truenas_create_nfs_share` / `truenas_update_nfs_share` — NFS exports
+- **iSCSI:** `truenas_create_iscsi_portal` / `_target` / `_extent` / `_targetextent` / `_auth` / `_initiator` — build a full iSCSI LUN stack (CHAP secrets never logged)
+- **NVMe-oF:** `truenas_create_nvme_subsystem` / `_namespace` / `_port` / `_port_subsys` / `_host` — build a full NVMe-over-Fabrics target
 - `truenas_create_user` / `truenas_update_user` / `truenas_set_user_password` — local users (passwords never logged)
 - `truenas_create_group` / `truenas_update_group` — local groups
 - `truenas_create_snapshot_task` / `truenas_update_snapshot_task` — automatic snapshot schedules
@@ -141,6 +145,8 @@ the structured result is machine-validated by the MCP client.
 - `truenas_delete_snapshot` / `truenas_delete_dataset` — delete a snapshot / dataset (destroys data)
 - `truenas_delete_smb_share` / `truenas_delete_nfs_share` — remove a share (underlying data kept)
 - `truenas_delete_rsync_task` / `truenas_delete_cloudsync_task` / `truenas_delete_replication_task` — remove a backup task (already-synced data kept)
+- `truenas_delete_iscsi` — delete an iSCSI target/extent/targetextent/portal/initiator/auth by id (backing zvol/file kept)
+- `truenas_delete_nvme` — delete an NVMe-oF subsys/namespace/port/port_subsys/host/host_subsys by id (backing zvol/file kept)
 - `truenas_delete_app` / `truenas_delete_vm` — delete an app / VM (optionally its data too)
 - `truenas_delete_user` / `truenas_delete_group` — delete a user / group
 - `truenas_rollback_snapshot` — revert a dataset to a snapshot (discards newer data)
@@ -160,7 +166,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **43 read, 37 safe-write, 20 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **45 read, 48 safe-write, 22 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

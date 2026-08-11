@@ -1246,6 +1246,181 @@ export class TrueNasClient {
     return this.provision("pool.snapshot.release", [id]);
   }
 
+  // ------------------------------------------------------------------
+  // Block sharing: iSCSI + NVMe-oF provisioning (Phase 5).
+  // ------------------------------------------------------------------
+
+  /** Read the whole iSCSI configuration in one call (CHAP secrets stripped at the tool layer). */
+  async iscsiOverview(): Promise<Record<string, unknown>> {
+    return this.wsOnly("iscsi overview", async () => {
+      const [global, targets, extents, targetextents, portals, initiators, auth] = await Promise.all([
+        this.call("iscsi.global.config", []),
+        this.call("iscsi.target.query", [[], {}]),
+        this.call("iscsi.extent.query", [[], {}]),
+        this.call("iscsi.targetextent.query", [[], {}]),
+        this.call("iscsi.portal.query", [[], {}]),
+        this.call("iscsi.initiator.query", [[], {}]),
+        this.call("iscsi.auth.query", [[], {}]),
+      ]);
+      return { global, targets, extents, targetextents, portals, initiators, auth };
+    });
+  }
+
+  /** Read the whole NVMe-oF configuration in one call. */
+  async nvmeOverview(): Promise<Record<string, unknown>> {
+    return this.wsOnly("nvme overview", async () => {
+      const [global, subsystems, namespaces, ports, hosts, portSubsys, hostSubsys] = await Promise.all([
+        this.call("nvmet.global.config", []),
+        this.call("nvmet.subsys.query", [[], {}]),
+        this.call("nvmet.namespace.query", [[], {}]),
+        this.call("nvmet.port.query", [[], {}]),
+        this.call("nvmet.host.query", [[], {}]),
+        this.call("nvmet.port_subsys.query", [[], {}]),
+        this.call("nvmet.host_subsys.query", [[], {}]),
+      ]);
+      return { global, subsystems, namespaces, ports, hosts, port_subsys: portSubsys, host_subsys: hostSubsys };
+    });
+  }
+
+  // ---- iSCSI creates ----
+  async createIscsiPortal(opts: { listen: string[]; comment?: string; discovery_authmethod?: string; discovery_authgroup?: number }): Promise<unknown> {
+    const data: Record<string, unknown> = { listen: opts.listen.map((ip) => ({ ip })) };
+    if (opts.comment !== undefined) data.comment = opts.comment;
+    if (opts.discovery_authmethod !== undefined) data.discovery_authmethod = opts.discovery_authmethod;
+    if (opts.discovery_authgroup !== undefined) data.discovery_authgroup = opts.discovery_authgroup;
+    return this.provision("iscsi.portal.create", [data]);
+  }
+
+  async createIscsiTarget(opts: {
+    name: string;
+    alias?: string;
+    mode?: string;
+    portal?: number;
+    initiator?: number;
+    auth?: number;
+    authmethod?: string;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { name: opts.name };
+    if (opts.alias !== undefined) data.alias = opts.alias;
+    if (opts.mode !== undefined) data.mode = opts.mode;
+    if (opts.portal !== undefined) {
+      data.groups = [
+        {
+          portal: opts.portal,
+          initiator: opts.initiator ?? null,
+          auth: opts.auth ?? null,
+          authmethod: opts.authmethod ?? "NONE",
+        },
+      ];
+    }
+    return this.provision("iscsi.target.create", [data]);
+  }
+
+  async createIscsiExtent(opts: {
+    name: string;
+    type?: string;
+    disk?: string;
+    path?: string;
+    filesize?: number;
+    blocksize?: number;
+    comment?: string;
+    enabled?: boolean;
+  }): Promise<unknown> {
+    const data: Record<string, unknown> = { name: opts.name, type: opts.type ?? "DISK" };
+    if (opts.disk !== undefined) data.disk = opts.disk;
+    if (opts.path !== undefined) data.path = opts.path;
+    if (opts.filesize !== undefined) data.filesize = opts.filesize;
+    if (opts.blocksize !== undefined) data.blocksize = opts.blocksize;
+    if (opts.comment !== undefined) data.comment = opts.comment;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    return this.provision("iscsi.extent.create", [data]);
+  }
+
+  async createIscsiTargetExtent(opts: { target: number; extent: number; lunid?: number }): Promise<unknown> {
+    const data: Record<string, unknown> = { target: opts.target, extent: opts.extent };
+    if (opts.lunid !== undefined) data.lunid = opts.lunid;
+    return this.provision("iscsi.targetextent.create", [data]);
+  }
+
+  /** iSCSI CHAP auth group. secret/peersecret are passed through and NEVER logged. */
+  async createIscsiAuth(opts: { tag: number; user: string; secret: string; peeruser?: string; peersecret?: string }): Promise<unknown> {
+    const data: Record<string, unknown> = { tag: opts.tag, user: opts.user, secret: opts.secret };
+    if (opts.peeruser !== undefined) data.peeruser = opts.peeruser;
+    if (opts.peersecret !== undefined) data.peersecret = opts.peersecret;
+    return this.provision("iscsi.auth.create", [data]);
+  }
+
+  async createIscsiInitiator(opts: { initiators?: string[]; comment?: string }): Promise<unknown> {
+    const data: Record<string, unknown> = {};
+    if (opts.initiators !== undefined) data.initiators = opts.initiators;
+    if (opts.comment !== undefined) data.comment = opts.comment;
+    return this.provision("iscsi.initiator.create", [data]);
+  }
+
+  private static ISCSI_DELETE: Record<string, string> = {
+    target: "iscsi.target.delete",
+    extent: "iscsi.extent.delete",
+    targetextent: "iscsi.targetextent.delete",
+    portal: "iscsi.portal.delete",
+    initiator: "iscsi.initiator.delete",
+    auth: "iscsi.auth.delete",
+  };
+
+  async deleteIscsi(resource: string, id: number): Promise<unknown> {
+    const method = TrueNasClient.ISCSI_DELETE[resource];
+    if (!method) throw new TrueNasError(`Unknown iSCSI resource '${resource}'.`);
+    return this.provision(method, [id]);
+  }
+
+  // ---- NVMe-oF creates ----
+  async createNvmeSubsys(opts: { name: string; allow_any_host?: boolean }): Promise<unknown> {
+    const data: Record<string, unknown> = { name: opts.name };
+    if (opts.allow_any_host !== undefined) data.allow_any_host = opts.allow_any_host;
+    return this.provision("nvmet.subsys.create", [data]);
+  }
+
+  async createNvmeNamespace(opts: { subsys_id: number; device_type: string; device_path: string; filesize?: number; enabled?: boolean }): Promise<unknown> {
+    const data: Record<string, unknown> = {
+      subsys_id: opts.subsys_id,
+      device_type: opts.device_type,
+      device_path: opts.device_path,
+    };
+    if (opts.filesize !== undefined) data.filesize = opts.filesize;
+    if (opts.enabled !== undefined) data.enabled = opts.enabled;
+    return this.provision("nvmet.namespace.create", [data]);
+  }
+
+  async createNvmePort(opts: { addr_trtype: string; addr_traddr?: string; addr_trsvcid?: number; addr_adrfam?: string }): Promise<unknown> {
+    const data: Record<string, unknown> = { addr_trtype: opts.addr_trtype };
+    if (opts.addr_traddr !== undefined) data.addr_traddr = opts.addr_traddr;
+    if (opts.addr_trsvcid !== undefined) data.addr_trsvcid = opts.addr_trsvcid;
+    if (opts.addr_adrfam !== undefined) data.addr_adrfam = opts.addr_adrfam;
+    return this.provision("nvmet.port.create", [data]);
+  }
+
+  async createNvmePortSubsys(opts: { port_id: number; subsys_id: number }): Promise<unknown> {
+    return this.provision("nvmet.port_subsys.create", [{ port_id: opts.port_id, subsys_id: opts.subsys_id }]);
+  }
+
+  async createNvmeHost(opts: { hostnqn: string }): Promise<unknown> {
+    return this.provision("nvmet.host.create", [{ hostnqn: opts.hostnqn }]);
+  }
+
+  private static NVME_DELETE: Record<string, string> = {
+    subsys: "nvmet.subsys.delete",
+    namespace: "nvmet.namespace.delete",
+    port: "nvmet.port.delete",
+    port_subsys: "nvmet.port_subsys.delete",
+    host: "nvmet.host.delete",
+    host_subsys: "nvmet.host_subsys.delete",
+  };
+
+  async deleteNvme(resource: string, id: number): Promise<unknown> {
+    const method = TrueNasClient.NVME_DELETE[resource];
+    if (!method) throw new TrueNasError(`Unknown NVMe-oF resource '${resource}'.`);
+    return this.provision(method, [id]);
+  }
+
   async createSmbShare(opts: {
     path: string;
     name: string;

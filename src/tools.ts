@@ -3202,6 +3202,101 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
   );
 
+  // ---------------- iSCSI overview ----------------
+  server.registerTool(
+    "truenas_iscsi_overview",
+    {
+      title: "iSCSI Configuration Overview",
+      description:
+        "Report the entire iSCSI configuration in one call: global settings, targets, extents (backing storage), " +
+        "target↔extent mappings (LUNs), portals, allowed initiators, and CHAP auth groups. CHAP secrets are stripped.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        global: z.record(z.string(), z.unknown()),
+        targets: z.array(z.record(z.string(), z.unknown())),
+        extents: z.array(z.record(z.string(), z.unknown())),
+        targetextents: z.array(z.record(z.string(), z.unknown())),
+        portals: z.array(z.record(z.string(), z.unknown())),
+        initiators: z.array(z.record(z.string(), z.unknown())),
+        auth: z.array(z.record(z.string(), z.unknown())),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const o = await getClient().iscsiOverview();
+        const arr = (v: unknown) => (Array.isArray(v) ? (v as Array<Record<string, unknown>>) : []);
+        const g = (o.global as Record<string, unknown>) ?? {};
+        const structured = {
+          global: { basename: g.basename ?? null, listen_port: g.listen_port ?? null, alua: g.alua ?? null, iser: g.iser ?? null },
+          targets: arr(o.targets).map((t) => ({ id: t.id, name: t.name, alias: t.alias, mode: t.mode, groups: t.groups })),
+          extents: arr(o.extents).map((e) => ({ id: e.id, name: e.name, type: e.type, disk: e.disk, path: e.path, blocksize: e.blocksize, enabled: e.enabled })),
+          targetextents: arr(o.targetextents).map((x) => ({ id: x.id, target: x.target, extent: x.extent, lunid: x.lunid })),
+          portals: arr(o.portals).map((p) => ({ id: p.id, listen: p.listen, comment: p.comment })),
+          initiators: arr(o.initiators).map((i) => ({ id: i.id, initiators: i.initiators, comment: i.comment })),
+          // CHAP secret + peersecret intentionally stripped.
+          auth: arr(o.auth).map((a) => ({ id: a.id, tag: a.tag, user: a.user, peeruser: a.peeruser })),
+        };
+        return respond(structured, response_format, () =>
+          [
+            `**iSCSI** (base ${structured.global.basename}, port ${structured.global.listen_port})`,
+            `Targets: ${structured.targets.length} · Extents: ${structured.extents.length} · LUN maps: ${structured.targetextents.length} · Portals: ${structured.portals.length} · Initiator groups: ${structured.initiators.length} · CHAP auth: ${structured.auth.length}`,
+            structured.targets.length ? "\n" + mdTable(["Target id", "Name", "Alias"], structured.targets.map((t) => [t.id as number, t.name as string, t.alias as string])) : "\n_No targets configured._",
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ---------------- NVMe-oF overview ----------------
+  server.registerTool(
+    "truenas_nvme_overview",
+    {
+      title: "NVMe-oF Configuration Overview",
+      description:
+        "Report the entire NVMe-over-Fabrics configuration in one call: global settings, subsystems, namespaces " +
+        "(backing storage), ports (transport/address), allowed hosts, and the port↔subsystem and host↔subsystem links.",
+      inputSchema: z.object({ response_format: responseFormat }),
+      outputSchema: z.object({
+        global: z.record(z.string(), z.unknown()),
+        subsystems: z.array(z.record(z.string(), z.unknown())),
+        namespaces: z.array(z.record(z.string(), z.unknown())),
+        ports: z.array(z.record(z.string(), z.unknown())),
+        hosts: z.array(z.record(z.string(), z.unknown())),
+        port_subsys: z.array(z.record(z.string(), z.unknown())),
+        host_subsys: z.array(z.record(z.string(), z.unknown())),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ response_format }): Promise<ToolResult> => {
+      try {
+        const o = await getClient().nvmeOverview();
+        const arr = (v: unknown) => (Array.isArray(v) ? (v as Array<Record<string, unknown>>) : []);
+        const g = (o.global as Record<string, unknown>) ?? {};
+        const structured = {
+          global: { basenqn: g.basenqn ?? null, kernel: g.kernel ?? null, ana: g.ana ?? null, rdma: g.rdma ?? null },
+          subsystems: arr(o.subsystems).map((s) => ({ id: s.id, name: s.name, subnqn: s.subnqn, allow_any_host: s.allow_any_host })),
+          namespaces: arr(o.namespaces).map((n) => ({ id: n.id, subsys_id: n.subsys_id, device_type: n.device_type, device_path: n.device_path, enabled: n.enabled })),
+          ports: arr(o.ports).map((p) => ({ id: p.id, addr_trtype: p.addr_trtype, addr_traddr: p.addr_traddr, addr_trsvcid: p.addr_trsvcid })),
+          hosts: arr(o.hosts).map((h) => ({ id: h.id, hostnqn: h.hostnqn })),
+          port_subsys: arr(o.port_subsys).map((x) => ({ id: x.id, port_id: x.port_id, subsys_id: x.subsys_id })),
+          host_subsys: arr(o.host_subsys).map((x) => ({ id: x.id, host_id: x.host_id, subsys_id: x.subsys_id })),
+        };
+        return respond(structured, response_format, () =>
+          [
+            `**NVMe-oF** (base ${structured.global.basenqn})`,
+            `Subsystems: ${structured.subsystems.length} · Namespaces: ${structured.namespaces.length} · Ports: ${structured.ports.length} · Hosts: ${structured.hosts.length} · Port links: ${structured.port_subsys.length}`,
+            structured.subsystems.length ? "\n" + mdTable(["Subsys id", "Name", "NQN"], structured.subsystems.map((s) => [s.id as number, s.name as string, s.subnqn as string])) : "\n_No subsystems configured._",
+          ].join("\n")
+        );
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
   // ================================================================
   // Safe writes (Tier W) — registered ONLY when TRUENAS_ENABLE_WRITE=1.
   // Reversible mutations; never set readOnlyHint. Every call is audit-logged to
@@ -4584,6 +4679,221 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ================================================================
+    // Block sharing: iSCSI + NVMe-oF provisioning (Phase 5).
+    // ================================================================
+
+    // Helper for the many similar "create a block-sharing resource" tools.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const simpleCreate = (spec: {
+      name: string;
+      title: string;
+      description: string;
+      inputSchema: z.ZodObject<any>;
+      method: string;
+      target: (args: GateArgs) => string;
+      run: (client: TrueNasClient, args: GateArgs) => Promise<unknown>;
+      summary: (args: GateArgs, result: { id?: number }) => string;
+    }): void => {
+      server.registerTool(
+        spec.name,
+        {
+          title: spec.title,
+          description: spec.description + " Requires TRUENAS_ENABLE_WRITE=1.",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          inputSchema: spec.inputSchema.extend({ response_format: responseFormat }) as any,
+          outputSchema: z.object({ created: z.boolean(), id: z.number().nullable() }),
+          annotations: SAFE_WRITE,
+        },
+        async (args: GateArgs): Promise<ToolResult> => {
+          const format = (args.response_format ?? "markdown") as "markdown" | "json";
+          try {
+            const r = (await spec.run(getClient(), args)) as { id?: number };
+            auditLog({ tool: spec.name, method: spec.method, target: spec.target(args), outcome: "success" });
+            return respond({ created: true, id: r?.id ?? null }, format, () => spec.summary(args, r ?? {}));
+          } catch (error) {
+            auditLog({ tool: spec.name, method: spec.method, target: spec.target(args), outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+            return errorResult(error);
+          }
+        }
+      );
+    };
+
+    // ---- iSCSI ----
+    simpleCreate({
+      name: "truenas_create_iscsi_portal",
+      title: "Create iSCSI Portal",
+      description: "Create an iSCSI portal — the IP(s) the target service listens on. Use the returned id when creating a target.",
+      inputSchema: z.object({
+        listen: z.array(z.string()).min(1).describe("IP address(es) to listen on, e.g. ['0.0.0.0']"),
+        comment: z.string().optional(),
+        discovery_authmethod: z.enum(["NONE", "CHAP", "CHAP_MUTUAL"]).optional(),
+        discovery_authgroup: z.number().int().optional().describe("CHAP auth group tag for discovery"),
+      }),
+      method: "iscsi.portal.create",
+      target: (a) => `portal:${(a.listen as string[]).join(",")}`,
+      run: (c, a) => c.createIscsiPortal(a as { listen: string[]; comment?: string; discovery_authmethod?: string; discovery_authgroup?: number }),
+      summary: (a, r) => `Created iSCSI portal${r.id ? ` (id ${r.id})` : ""} listening on ${(a.listen as string[]).join(", ")}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_iscsi_target",
+      title: "Create iSCSI Target",
+      description: "Create an iSCSI target. Optionally attach a portal group (portal id + optional initiator/auth). Map extents to it with truenas_create_iscsi_targetextent.",
+      inputSchema: z.object({
+        name: z.string().describe("Target name (lowercase, becomes part of the IQN)"),
+        alias: z.string().optional(),
+        mode: z.enum(["ISCSI", "FC", "BOTH"]).optional(),
+        portal: z.number().int().optional().describe("Portal id to attach (from truenas_create_iscsi_portal)"),
+        initiator: z.number().int().optional().describe("Initiator group id"),
+        auth: z.number().int().optional().describe("CHAP auth group tag"),
+        authmethod: z.enum(["NONE", "CHAP", "CHAP_MUTUAL"]).optional(),
+      }),
+      method: "iscsi.target.create",
+      target: (a) => `target:${a.name}`,
+      run: (c, a) => c.createIscsiTarget(a as { name: string; alias?: string; mode?: string; portal?: number; initiator?: number; auth?: number; authmethod?: string }),
+      summary: (a, r) => `Created iSCSI target **${a.name}**${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_iscsi_extent",
+      title: "Create iSCSI Extent",
+      description: "Create an iSCSI extent — the backing storage for a LUN. Use type=DISK with a zvol (disk='zvol/POOL/NAME'), or type=FILE with a path and filesize.",
+      inputSchema: z.object({
+        name: z.string(),
+        type: z.enum(["DISK", "FILE"]).default("DISK"),
+        disk: z.string().optional().describe("Backing zvol for DISK type, e.g. 'zvol/SSD/lun0'"),
+        path: z.string().optional().describe("File path for FILE type, e.g. '/mnt/SSD/lun0.img'"),
+        filesize: z.number().int().optional().describe("File size in bytes (FILE type)"),
+        blocksize: z.number().int().optional().describe("Logical block size (512/1024/2048/4096)"),
+        comment: z.string().optional(),
+      }),
+      method: "iscsi.extent.create",
+      target: (a) => `extent:${a.name}`,
+      run: (c, a) => c.createIscsiExtent(a as { name: string; type?: string; disk?: string; path?: string; filesize?: number; blocksize?: number; comment?: string }),
+      summary: (a, r) => `Created iSCSI extent **${a.name}**${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_iscsi_targetextent",
+      title: "Map iSCSI Extent to Target (LUN)",
+      description: "Associate an extent with a target as a LUN. This is the step that exposes the storage over iSCSI.",
+      inputSchema: z.object({
+        target: z.number().int().describe("Target id"),
+        extent: z.number().int().describe("Extent id"),
+        lunid: z.number().int().optional().describe("LUN id (auto-assigned if omitted)"),
+      }),
+      method: "iscsi.targetextent.create",
+      target: (a) => `targetextent:t${a.target}-e${a.extent}`,
+      run: (c, a) => c.createIscsiTargetExtent(a as { target: number; extent: number; lunid?: number }),
+      summary: (a, r) => `Mapped extent ${a.extent} to target ${a.target}${r.id ? ` (LUN map id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_iscsi_auth",
+      title: "Create iSCSI CHAP Auth",
+      description: "Create a CHAP authentication group. The secret (and optional mutual peersecret) are sent to TrueNAS and never logged or echoed.",
+      inputSchema: z.object({
+        tag: z.number().int().describe("Auth group tag (group multiple entries under one number)"),
+        user: z.string().describe("CHAP username"),
+        secret: z.string().describe("CHAP secret (12–16 chars)"),
+        peeruser: z.string().optional().describe("Mutual CHAP username"),
+        peersecret: z.string().optional().describe("Mutual CHAP secret"),
+      }),
+      method: "iscsi.auth.create",
+      target: (a) => `auth:tag${a.tag}`,
+      run: (c, a) => c.createIscsiAuth(a as { tag: number; user: string; secret: string; peeruser?: string; peersecret?: string }),
+      summary: (a, r) => `Created CHAP auth for user **${a.user}** (tag ${a.tag})${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_iscsi_initiator",
+      title: "Create iSCSI Initiator Group",
+      description: "Create an allowed-initiators group. Leave 'initiators' empty to allow all initiators.",
+      inputSchema: z.object({
+        initiators: z.array(z.string()).optional().describe("Allowed initiator IQNs (empty/omitted = allow all)"),
+        comment: z.string().optional(),
+      }),
+      method: "iscsi.initiator.create",
+      target: () => "initiator",
+      run: (c, a) => c.createIscsiInitiator(a as { initiators?: string[]; comment?: string }),
+      summary: (a, r) => `Created iSCSI initiator group${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    // ---- NVMe-oF ----
+    simpleCreate({
+      name: "truenas_create_nvme_subsystem",
+      title: "Create NVMe-oF Subsystem",
+      description: "Create an NVMe-oF subsystem (the NVMe equivalent of an iSCSI target). Add namespaces and link a port to expose it.",
+      inputSchema: z.object({
+        name: z.string().describe("Subsystem name (becomes part of the NQN)"),
+        allow_any_host: z.boolean().optional().describe("Allow any host to connect (skip host allow-list)"),
+      }),
+      method: "nvmet.subsys.create",
+      target: (a) => `subsys:${a.name}`,
+      run: (c, a) => c.createNvmeSubsys(a as { name: string; allow_any_host?: boolean }),
+      summary: (a, r) => `Created NVMe-oF subsystem **${a.name}**${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_nvme_namespace",
+      title: "Create NVMe-oF Namespace",
+      description: "Create a namespace (backing storage) in a subsystem. Use device_type=ZVOL with device_path='zvol/POOL/NAME', or device_type=FILE with a path and filesize.",
+      inputSchema: z.object({
+        subsys_id: z.number().int().describe("Subsystem id"),
+        device_type: z.enum(["ZVOL", "FILE"]),
+        device_path: z.string().describe("'zvol/POOL/NAME' for ZVOL, or a file path for FILE"),
+        filesize: z.number().int().optional().describe("File size in bytes (FILE type)"),
+      }),
+      method: "nvmet.namespace.create",
+      target: (a) => `namespace:s${a.subsys_id}`,
+      run: (c, a) => c.createNvmeNamespace(a as { subsys_id: number; device_type: string; device_path: string; filesize?: number }),
+      summary: (a, r) => `Created NVMe namespace on subsystem ${a.subsys_id}${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_nvme_port",
+      title: "Create NVMe-oF Port",
+      description: "Create a transport port (where the subsystem is reachable). For TCP set addr_traddr (IP) and addr_trsvcid (e.g. 4420).",
+      inputSchema: z.object({
+        addr_trtype: z.enum(["TCP", "RDMA", "FC"]).describe("Transport type"),
+        addr_traddr: z.string().optional().describe("Listen IP (TCP/RDMA)"),
+        addr_trsvcid: z.number().int().optional().describe("Port number, e.g. 4420 (TCP/RDMA)"),
+        addr_adrfam: z.enum(["IPV4", "IPV6"]).optional(),
+      }),
+      method: "nvmet.port.create",
+      target: (a) => `port:${a.addr_trtype}:${a.addr_traddr ?? "?"}`,
+      run: (c, a) => c.createNvmePort(a as { addr_trtype: string; addr_traddr?: string; addr_trsvcid?: number; addr_adrfam?: string }),
+      summary: (a, r) => `Created NVMe-oF ${a.addr_trtype} port${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_nvme_port_subsys",
+      title: "Link NVMe-oF Port to Subsystem",
+      description: "Associate a port with a subsystem — this is the step that actually exposes the subsystem on that transport.",
+      inputSchema: z.object({
+        port_id: z.number().int().describe("Port id"),
+        subsys_id: z.number().int().describe("Subsystem id"),
+      }),
+      method: "nvmet.port_subsys.create",
+      target: (a) => `port_subsys:p${a.port_id}-s${a.subsys_id}`,
+      run: (c, a) => c.createNvmePortSubsys(a as { port_id: number; subsys_id: number }),
+      summary: (a, r) => `Linked port ${a.port_id} to subsystem ${a.subsys_id}${r.id ? ` (id ${r.id})` : ""}.`,
+    });
+
+    simpleCreate({
+      name: "truenas_create_nvme_host",
+      title: "Create NVMe-oF Host",
+      description: "Register an allowed host by its NQN (for subsystems that don't allow any host). Link it to a subsystem in the UI or via host_subsys.",
+      inputSchema: z.object({
+        hostnqn: z.string().describe("Host NQN, e.g. 'nqn.2014-08.org.nvmexpress:uuid:...'"),
+      }),
+      method: "nvmet.host.create",
+      target: (a) => `host:${a.hostnqn}`,
+      run: (c, a) => c.createNvmeHost(a as { hostnqn: string }),
+      summary: (a, r) => `Registered NVMe-oF host${r.id ? ` (id ${r.id})` : ""}.`,
+    });
   }
 
   // ================================================================
@@ -4702,6 +5012,45 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       target: (a) => `replication:${a.id}`,
       run: (c, a) => c.deleteReplicationTask(a.id),
       summary: (a) => `Deleted replication task ${a.id}.`,
+    });
+
+    // ---------------- block-sharing teardown (Phase 5) ----------------
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_iscsi",
+      title: "Delete an iSCSI Resource",
+      description:
+        "Delete an iSCSI resource by type and id: target, extent, targetextent (LUN map), portal, initiator, or auth. " +
+        "IRREVERSIBLE. Deleting an extent removes the LUN mapping but does NOT delete the backing zvol/file. Requires " +
+        "TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        resource: z.enum(["target", "extent", "targetextent", "portal", "initiator", "auth"]).describe("Which iSCSI resource type"),
+        id: z.number().int().describe("Resource id (see truenas_iscsi_overview)"),
+        response_format: responseFormat,
+      }),
+      method: "iscsi.<resource>.delete",
+      action: (a) => `delete iSCSI ${a.resource} ${a.id}`,
+      target: (a) => `iscsi:${a.resource}:${a.id}`,
+      run: (c, a) => c.deleteIscsi(a.resource, a.id),
+      summary: (a) => `Deleted iSCSI ${a.resource} ${a.id}.`,
+    });
+
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_nvme",
+      title: "Delete an NVMe-oF Resource",
+      description:
+        "Delete an NVMe-oF resource by type and id: subsys, namespace, port, port_subsys, host, or host_subsys. " +
+        "IRREVERSIBLE. Deleting a namespace removes it but does NOT delete the backing zvol/file. Requires " +
+        "TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        resource: z.enum(["subsys", "namespace", "port", "port_subsys", "host", "host_subsys"]).describe("Which NVMe-oF resource type"),
+        id: z.number().int().describe("Resource id (see truenas_nvme_overview)"),
+        response_format: responseFormat,
+      }),
+      method: "nvmet.<resource>.delete",
+      action: (a) => `delete NVMe-oF ${a.resource} ${a.id}`,
+      target: (a) => `nvme:${a.resource}:${a.id}`,
+      run: (c, a) => c.deleteNvme(a.resource, a.id),
+      summary: (a) => `Deleted NVMe-oF ${a.resource} ${a.id}.`,
     });
 
     registerDestructive(server, config, getClient, {

@@ -393,3 +393,68 @@ test("promoteDataset / holdSnapshot / releaseSnapshot send their method with [id
     ["pool.snapshot.release", ["HDD@keep"]],
   ]);
 });
+
+// ---------------- Phase 5: iSCSI + NVMe-oF provisioning ----------------
+
+test("createIscsiPortal wraps listen IPs as [{ip}]", async () => {
+  const { client, calls } = stubClient();
+  await client.createIscsiPortal({ listen: ["0.0.0.0", "10.0.0.1"], comment: "c" });
+  assert.equal(calls[0].method, "iscsi.portal.create");
+  assert.deepEqual(calls[0].params, [{ listen: [{ ip: "0.0.0.0" }, { ip: "10.0.0.1" }], comment: "c" }]);
+});
+
+test("createIscsiTarget builds a group only when a portal is given", async () => {
+  const { client, calls } = stubClient();
+  await client.createIscsiTarget({ name: "t1" });
+  assert.deepEqual(calls[0].params, [{ name: "t1" }]);
+  await client.createIscsiTarget({ name: "t2", portal: 3 });
+  assert.deepEqual(calls[1].params, [{ name: "t2", groups: [{ portal: 3, initiator: null, auth: null, authmethod: "NONE" }] }]);
+});
+
+test("createIscsiExtent defaults type=DISK and passes disk", async () => {
+  const { client, calls } = stubClient();
+  await client.createIscsiExtent({ name: "e1", disk: "zvol/SSD/lun0" });
+  assert.equal(calls[0].method, "iscsi.extent.create");
+  assert.deepEqual(calls[0].params, [{ name: "e1", type: "DISK", disk: "zvol/SSD/lun0" }]);
+});
+
+test("createIscsiTargetExtent sends target+extent (+lunid)", async () => {
+  const { client, calls } = stubClient();
+  await client.createIscsiTargetExtent({ target: 1, extent: 2, lunid: 0 });
+  assert.deepEqual(calls[0].params, [{ target: 1, extent: 2, lunid: 0 }]);
+});
+
+test("deleteIscsi maps resource -> method and rejects unknown", async () => {
+  const { client, calls } = stubClient({ enableDestructive: true });
+  await client.deleteIscsi("targetextent", 5);
+  await client.deleteIscsi("portal", 2);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["iscsi.targetextent.delete", [5]],
+    ["iscsi.portal.delete", [2]],
+  ]);
+  await assert.rejects(() => client.deleteIscsi("bogus", 1));
+});
+
+test("createNvmeNamespace sends subsys_id/device_type/device_path", async () => {
+  const { client, calls } = stubClient();
+  await client.createNvmeNamespace({ subsys_id: 1, device_type: "ZVOL", device_path: "zvol/SSD/ns0" });
+  assert.equal(calls[0].method, "nvmet.namespace.create");
+  assert.deepEqual(calls[0].params, [{ subsys_id: 1, device_type: "ZVOL", device_path: "zvol/SSD/ns0" }]);
+});
+
+test("createNvmePortSubsys links port+subsys", async () => {
+  const { client, calls } = stubClient();
+  await client.createNvmePortSubsys({ port_id: 1, subsys_id: 2 });
+  assert.deepEqual(calls[0].params, [{ port_id: 1, subsys_id: 2 }]);
+});
+
+test("deleteNvme maps resource -> method and rejects unknown", async () => {
+  const { client, calls } = stubClient({ enableDestructive: true });
+  await client.deleteNvme("port_subsys", 9);
+  await client.deleteNvme("subsys", 1);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["nvmet.port_subsys.delete", [9]],
+    ["nvmet.subsys.delete", [1]],
+  ]);
+  await assert.rejects(() => client.deleteNvme("bogus", 1));
+});
