@@ -5136,6 +5136,408 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     );
+
+    // ================================================================
+    // Non-network system config mutation (Phase 7).
+    // ================================================================
+
+    const pick = (a: Record<string, unknown>, keys: string[]): Record<string, unknown> => {
+      const d: Record<string, unknown> = {};
+      for (const k of keys) if (a[k] !== undefined) d[k] = a[k];
+      return d;
+    };
+
+    // ---- system.general ----
+    server.registerTool(
+      "truenas_update_system_general",
+      {
+        title: "Update General System Settings",
+        description:
+          "Update non-network general settings: timezone, keyboard map, whether console messages show in the UI footer, " +
+          "and usage-stats opt-in. Network/UI-address/port settings are intentionally NOT exposed. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          timezone: z.string().optional().describe("e.g. 'America/Chicago'"),
+          kbdmap: z.string().optional().describe("Keyboard map, e.g. 'us'"),
+          ui_consolemsg: z.boolean().optional().describe("Show console messages in the UI footer"),
+          usage_collection: z.boolean().optional().describe("Send anonymous usage stats to iX"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), applied: z.record(z.string(), z.unknown()) }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["timezone", "kbdmap", "ui_consolemsg", "usage_collection"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateSystemGeneral(data);
+          auditLog({ tool: "truenas_update_system_general", method: "system.general.update", target: "system.general", outcome: "success" });
+          return respond({ updated: true, applied: data }, response_format ?? "markdown", () => `Updated general settings: ${Object.keys(data).join(", ")}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_system_general", method: "system.general.update", target: "system.general", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- system.advanced ----
+    server.registerTool(
+      "truenas_update_system_advanced",
+      {
+        title: "Update Advanced System Settings",
+        description:
+          "Update non-network advanced settings: MOTD, login banner, console menu, console messages, advanced mode, " +
+          "autotune, boot-scrub interval, syslog level, and serial console. Syslog-server/network settings are NOT " +
+          "exposed. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          motd: z.string().optional(),
+          login_banner: z.string().optional(),
+          consolemenu: z.boolean().optional().describe("Enable the console menu"),
+          consolemsg: z.boolean().optional().describe("Show console messages"),
+          advancedmode: z.boolean().optional(),
+          autotune: z.boolean().optional(),
+          boot_scrub: z.number().int().min(1).optional().describe("Boot-pool scrub interval (days)"),
+          sysloglevel: z.enum(["F_EMERG", "F_ALERT", "F_CRIT", "F_ERR", "F_WARNING", "F_NOTICE", "F_INFO", "F_DEBUG"]).optional(),
+          serialconsole: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), applied: z.record(z.string(), z.unknown()) }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["motd", "login_banner", "consolemenu", "consolemsg", "advancedmode", "autotune", "boot_scrub", "sysloglevel", "serialconsole"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateSystemAdvanced(data);
+          auditLog({ tool: "truenas_update_system_advanced", method: "system.advanced.update", target: "system.advanced", outcome: "success" });
+          return respond({ updated: true, applied: data }, response_format ?? "markdown", () => `Updated advanced settings: ${Object.keys(data).join(", ")}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_system_advanced", method: "system.advanced.update", target: "system.advanced", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- email (SMTP) ----
+    server.registerTool(
+      "truenas_update_email",
+      {
+        title: "Update Email (SMTP) Settings",
+        description:
+          "Configure the outgoing email used for alerts: from address/name, SMTP server + port, security, and optional " +
+          "auth (user + password). The password is sent to TrueNAS but never logged or echoed back. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          fromemail: z.string().optional(),
+          fromname: z.string().optional(),
+          outgoingserver: z.string().optional().describe("SMTP server hostname"),
+          port: z.number().int().optional(),
+          security: z.enum(["PLAIN", "SSL", "TLS"]).optional(),
+          smtp: z.boolean().optional().describe("SMTP auth required"),
+          user: z.string().optional().describe("SMTP username"),
+          pass: z.string().optional().describe("SMTP password (never logged)"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), outgoingserver: z.string().nullable(), fromemail: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["fromemail", "fromname", "outgoingserver", "port", "security", "smtp", "user", "pass"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          const raw = (await getClient().updateEmail(data)) as { outgoingserver?: string; fromemail?: string };
+          // Audit lists changed FIELD NAMES only — never the password value.
+          auditLog({ tool: "truenas_update_email", method: "mail.update", target: `email:${Object.keys(data).join(",")}`, outcome: "success" });
+          // Response returns only non-secret fields (never `pass`).
+          return respond({ updated: true, outgoingserver: raw?.outgoingserver ?? null, fromemail: raw?.fromemail ?? null }, response_format ?? "markdown", () => `Updated email settings (${Object.keys(data).filter((k) => k !== "pass").join(", ")}${data.pass !== undefined ? ", password" : ""}).`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_email", method: "mail.update", target: "email", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- init/shutdown scripts ----
+    const initFields = {
+      type: z.enum(["COMMAND", "SCRIPT"]).describe("COMMAND (inline) or SCRIPT (a file on the NAS)"),
+      when: z.enum(["PREINIT", "POSTINIT", "SHUTDOWN"]).describe("When to run"),
+      command: z.string().optional().describe("Shell command (type=COMMAND)"),
+      script: z.string().optional().describe("Path to a script on the NAS (type=SCRIPT)"),
+      enabled: z.boolean().optional(),
+      timeout: z.number().int().optional().describe("Seconds to allow before timing out"),
+      comment: z.string().optional(),
+    };
+    server.registerTool(
+      "truenas_create_init_script",
+      {
+        title: "Create Init/Shutdown Script",
+        description: "Create a startup (PREINIT/POSTINIT) or SHUTDOWN hook — an inline command or a script file on the NAS. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({ ...initFields, response_format: responseFormat }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["type", "when", "command", "script", "enabled", "timeout", "comment"]);
+          const raw = (await getClient().createInitScript(data)) as { id?: number };
+          auditLog({ tool: "truenas_create_init_script", method: "initshutdownscript.create", target: `init:${args.when}`, outcome: "success" });
+          return respond({ created: true, id: raw?.id ?? null }, response_format ?? "markdown", () => `Created ${args.when} ${args.type} hook${raw?.id ? ` (id ${raw.id})` : ""}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_init_script", method: "initshutdownscript.create", target: "init", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+    server.registerTool(
+      "truenas_update_init_script",
+      {
+        title: "Update Init/Shutdown Script",
+        description: "Update an init/shutdown hook by id (see truenas_list_init_scripts). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int().describe("Init script id"),
+          type: initFields.type.optional(),
+          when: initFields.when.optional(),
+          command: initFields.command,
+          script: initFields.script,
+          enabled: initFields.enabled,
+          timeout: initFields.timeout,
+          comment: initFields.comment,
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { id, response_format } = args as { id: number; response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["type", "when", "command", "script", "enabled", "timeout", "comment"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateInitScript(id, data);
+          auditLog({ tool: "truenas_update_init_script", method: "initshutdownscript.update", target: `init:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated init script ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_init_script", method: "initshutdownscript.update", target: `init:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- NTP servers ----
+    server.registerTool(
+      "truenas_create_ntp_server",
+      {
+        title: "Add NTP Server",
+        description: "Add an NTP time source. Time sync only — does not change any network interface. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          address: z.string().describe("NTP server hostname/IP, e.g. 'pool.ntp.org'"),
+          iburst: z.boolean().optional(),
+          burst: z.boolean().optional(),
+          prefer: z.boolean().optional(),
+          minpoll: z.number().int().optional(),
+          maxpoll: z.number().int().optional(),
+          force: z.boolean().optional().describe("Add even if the server is unreachable now"),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["address", "iburst", "burst", "prefer", "minpoll", "maxpoll", "force"]);
+          const raw = (await getClient().createNtpServer(data)) as { id?: number };
+          auditLog({ tool: "truenas_create_ntp_server", method: "system.ntpserver.create", target: `ntp:${args.address}`, outcome: "success" });
+          return respond({ created: true, id: raw?.id ?? null }, response_format ?? "markdown", () => `Added NTP server **${args.address}**${raw?.id ? ` (id ${raw.id})` : ""}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_ntp_server", method: "system.ntpserver.create", target: "ntp", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+    server.registerTool(
+      "truenas_update_ntp_server",
+      {
+        title: "Update NTP Server",
+        description: "Update an NTP server by id (see truenas_list_ntp_servers). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int(),
+          address: z.string().optional(),
+          iburst: z.boolean().optional(),
+          burst: z.boolean().optional(),
+          prefer: z.boolean().optional(),
+          minpoll: z.number().int().optional(),
+          maxpoll: z.number().int().optional(),
+          force: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { id, response_format } = args as { id: number; response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["address", "iburst", "burst", "prefer", "minpoll", "maxpoll", "force"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateNtpServer(id, data);
+          auditLog({ tool: "truenas_update_ntp_server", method: "system.ntpserver.update", target: `ntp:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated NTP server ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_ntp_server", method: "system.ntpserver.update", target: `ntp:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- cron jobs ----
+    const cronScheduleFields = {
+      minute: z.string().optional().describe("Cron minute (default '0')"),
+      hour: z.string().optional().describe("Cron hour (default '*')"),
+      dom: z.string().optional().describe("Day of month (default '*')"),
+      month: z.string().optional().describe("Month (default '*')"),
+      dow: z.string().optional().describe("Day of week (default '*')"),
+    };
+    const cronSchedule = (a: Record<string, unknown>): Record<string, string> | undefined => {
+      if (a.minute === undefined && a.hour === undefined && a.dom === undefined && a.month === undefined && a.dow === undefined) return undefined;
+      return {
+        minute: (a.minute as string) ?? "0",
+        hour: (a.hour as string) ?? "*",
+        dom: (a.dom as string) ?? "*",
+        month: (a.month as string) ?? "*",
+        dow: (a.dow as string) ?? "*",
+      };
+    };
+    server.registerTool(
+      "truenas_create_cron_job",
+      {
+        title: "Create Cron Job",
+        description: "Create a scheduled command (cron job) that runs as a given user. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          command: z.string().describe("Command to run"),
+          user: z.string().describe("User to run as, e.g. 'root'"),
+          description: z.string().optional(),
+          enabled: z.boolean().optional(),
+          ...cronScheduleFields,
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ created: z.boolean(), id: z.number().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["command", "user", "description", "enabled"]);
+          const sched = cronSchedule(args as Record<string, unknown>);
+          if (sched) data.schedule = sched;
+          const raw = (await getClient().createCronJob(data)) as { id?: number };
+          auditLog({ tool: "truenas_create_cron_job", method: "cronjob.create", target: `cron:${args.user}`, outcome: "success" });
+          return respond({ created: true, id: raw?.id ?? null }, response_format ?? "markdown", () => `Created cron job${raw?.id ? ` (id ${raw.id})` : ""} for **${args.user}**.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_create_cron_job", method: "cronjob.create", target: "cron", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+    server.registerTool(
+      "truenas_update_cron_job",
+      {
+        title: "Update Cron Job",
+        description: "Update a cron job by id (see truenas_list_cron_jobs). Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int(),
+          command: z.string().optional(),
+          user: z.string().optional(),
+          description: z.string().optional(),
+          enabled: z.boolean().optional(),
+          ...cronScheduleFields,
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ updated: z.boolean(), id: z.number() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const { id, response_format } = args as { id: number; response_format?: "markdown" | "json" };
+        try {
+          const data = pick(args as Record<string, unknown>, ["command", "user", "description", "enabled"]);
+          const sched = cronSchedule(args as Record<string, unknown>);
+          if (sched) data.schedule = sched;
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          await getClient().updateCronJob(id, data);
+          auditLog({ tool: "truenas_update_cron_job", method: "cronjob.update", target: `cron:${id}`, outcome: "success" });
+          return respond({ updated: true, id }, response_format ?? "markdown", () => `Updated cron job ${id}.`);
+        } catch (error) {
+          auditLog({ tool: "truenas_update_cron_job", method: "cronjob.update", target: `cron:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
+    // ---- tunables (sysctl/udev/rc) ----
+    server.registerTool(
+      "truenas_create_tunable",
+      {
+        title: "Create Tunable",
+        description:
+          "Create a system tunable (SYSCTL kernel parameter, UDEV rule, or RC config). Advanced — a bad value can " +
+          "affect stability. Runs as a job. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          type: z.enum(["SYSCTL", "UDEV", "RC"]).default("SYSCTL"),
+          var: z.string().describe("Variable/name, e.g. 'kernel.watchdog'"),
+          value: z.string().describe("Value to set"),
+          comment: z.string().optional(),
+          enabled: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ var: z.string(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async (args): Promise<ToolResult> => {
+        const a = args as Record<string, unknown>;
+        const { response_format } = args as { response_format?: "markdown" | "json" };
+        try {
+          const data = pick(a, ["type", "var", "value", "comment", "enabled"]);
+          const out = await getClient().createTunable(data);
+          auditLog({ tool: "truenas_create_tunable", method: "tunable.create", target: `tunable:${a.var}`, outcome: out.error ? `error: ${out.error}` : out.state });
+          return respond({ var: a.var as string, job_id: out.jobId, state: out.state, error: out.error }, response_format ?? "markdown", () =>
+            out.error ? `Tunable ${a.var} failed: ${out.error}` : `Set tunable **${a.var}** → **${out.state}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_create_tunable", method: "tunable.create", target: `tunable:${a.var}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+    server.registerTool(
+      "truenas_update_tunable",
+      {
+        title: "Update Tunable",
+        description: "Update a tunable by id (see truenas_list_tunables) — change its value, comment, or enabled state. Runs as a job. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({
+          id: z.number().int(),
+          value: z.string().optional(),
+          comment: z.string().optional(),
+          enabled: z.boolean().optional(),
+          response_format: responseFormat,
+        }),
+        outputSchema: z.object({ id: z.number(), job_id: z.number().nullable(), state: z.string(), error: z.string().nullable() }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ id, value, comment, enabled, response_format }): Promise<ToolResult> => {
+        try {
+          const data = pick({ value, comment, enabled }, ["value", "comment", "enabled"]);
+          if (Object.keys(data).length === 0) throw new TrueNasError("No fields supplied to update.");
+          const out = await getClient().updateTunable(id, data);
+          auditLog({ tool: "truenas_update_tunable", method: "tunable.update", target: `tunable:${id}`, outcome: out.error ? `error: ${out.error}` : out.state });
+          return respond({ id, job_id: out.jobId, state: out.state, error: out.error }, response_format, () =>
+            out.error ? `Tunable ${id} update failed: ${out.error}` : `Updated tunable ${id} → **${out.state}**.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_update_tunable", method: "tunable.update", target: `tunable:${id}`, outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
   }
 
   // ================================================================
@@ -5322,6 +5724,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       target: (a) => `cert:${a.id}`,
       run: (c, a) => c.deleteCertificate(a.id),
       summary: (a) => `Deleted certificate ${a.id}.`,
+    });
+
+    // ---------------- non-network config teardown (Phase 7) ----------------
+    registerDestructive(server, config, getClient, {
+      name: "truenas_delete_config",
+      title: "Delete a Config Item",
+      description:
+        "Delete a non-network config item by type and id: init_script (init/shutdown hook), ntp_server, cron_job, or " +
+        "tunable. IRREVERSIBLE. Requires TRUENAS_ENABLE_DESTRUCTIVE=1 + confirmation.",
+      inputSchema: z.object({
+        resource: z.enum(["init_script", "ntp_server", "cron_job", "tunable"]).describe("Which config item type"),
+        id: z.number().int().describe("Item id (from the matching list tool)"),
+        response_format: responseFormat,
+      }),
+      method: "<config>.delete",
+      action: (a) => `delete ${a.resource} ${a.id}`,
+      target: (a) => `config:${a.resource}:${a.id}`,
+      run: (c, a) => c.deleteConfig(a.resource, a.id),
+      summary: (a) => `Deleted ${a.resource} ${a.id}.`,
     });
 
     registerDestructive(server, config, getClient, {

@@ -144,6 +144,12 @@ the structured result is machine-validated by the MCP client.
 - `truenas_create_certificate` — import a cert (+ private key) or generate a CSR (private key never logged)
 - `truenas_create_snapshot_task` / `truenas_update_snapshot_task` — automatic snapshot schedules
 - `truenas_create_scrub_task` / `truenas_update_scrub_task` — scheduled scrubs
+- `truenas_update_system_general` / `truenas_update_system_advanced` — non-network system settings (timezone, MOTD, console, etc.)
+- `truenas_update_email` — outgoing SMTP for alerts (password never logged)
+- `truenas_create_init_script` / `truenas_update_init_script` — init/shutdown hooks
+- `truenas_create_ntp_server` / `truenas_update_ntp_server` — NTP time sources
+- `truenas_create_cron_job` / `truenas_update_cron_job` — scheduled commands
+- `truenas_create_tunable` / `truenas_update_tunable` — sysctl / udev / rc tunables
 
 **Destructive (opt-in — set BOTH `TRUENAS_ENABLE_WRITE=1` and `TRUENAS_ENABLE_DESTRUCTIVE=1`)** — irreversible; `destructiveHint:true`; each requires a human elicitation confirmation and refuses if the client can't be prompted:
 - `truenas_delete_snapshot` / `truenas_delete_dataset` — delete a snapshot / dataset (destroys data)
@@ -158,6 +164,7 @@ the structured result is machine-validated by the MCP client.
 - `truenas_lock_dataset` — lock an encrypted dataset
 - `truenas_pool_detach_disk` / `truenas_pool_offline_disk` / `truenas_pool_remove_vdev` — pool device operations
 - `truenas_upgrade_pool` — apply ZFS feature flags (irreversible)
+- `truenas_delete_config` — delete a non-network config item (init_script / ntp_server / cron_job / tunable) by id
 - `truenas_reboot_system` / `truenas_shutdown_system` — reboot / power off the NAS
 - `truenas_apply_update` — apply the pending OS update and reboot
 
@@ -171,7 +178,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **47 read, 51 safe-write, 24 destructive** tools. Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **47 read, 62 safe-write, 25 destructive** tools (134 total). Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot

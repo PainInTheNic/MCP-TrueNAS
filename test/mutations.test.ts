@@ -494,3 +494,60 @@ test("createCertificate keeps create_type and only provided fields", async () =>
   assert.equal(calls[0].method, "certificate.create");
   assert.deepEqual(calls[0].params, [{ name: "web", create_type: "CERTIFICATE_CREATE_IMPORTED", certificate: "PEM", privatekey: "KEY" }]);
 });
+
+// ---------------- Phase 7: non-network config mutation ----------------
+
+test("config singleton updaters target the right method with [data]", async () => {
+  const { client, calls } = stubClient();
+  await client.updateSystemGeneral({ timezone: "UTC" });
+  await client.updateSystemAdvanced({ motd: "hi" });
+  await client.updateEmail({ fromname: "NAS" });
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["system.general.update", [{ timezone: "UTC" }]],
+    ["system.advanced.update", [{ motd: "hi" }]],
+    ["mail.update", [{ fromname: "NAS" }]],
+  ]);
+});
+
+test("init/ntp/cron create+update target their methods with [data] / [id, data]", async () => {
+  const { client, calls } = stubClient();
+  await client.createInitScript({ type: "COMMAND", when: "POSTINIT", command: "true" });
+  await client.updateInitScript(1, { enabled: false });
+  await client.createNtpServer({ address: "pool.ntp.org" });
+  await client.updateNtpServer(2, { prefer: true });
+  await client.createCronJob({ command: "true", user: "root" });
+  await client.updateCronJob(3, { enabled: false });
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["initshutdownscript.create", [{ type: "COMMAND", when: "POSTINIT", command: "true" }]],
+    ["initshutdownscript.update", [1, { enabled: false }]],
+    ["system.ntpserver.create", [{ address: "pool.ntp.org" }]],
+    ["system.ntpserver.update", [2, { prefer: true }]],
+    ["cronjob.create", [{ command: "true", user: "root" }]],
+    ["cronjob.update", [3, { enabled: false }]],
+  ]);
+});
+
+test("tunable create/update use tunable.* (as jobs)", async () => {
+  const { client, calls } = stubClient();
+  await client.createTunable({ type: "SYSCTL", var: "vm.swappiness", value: "60" });
+  await client.updateTunable(1, { value: "50" });
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["tunable.create", [{ type: "SYSCTL", var: "vm.swappiness", value: "60" }]],
+    ["tunable.update", [1, { value: "50" }]],
+  ]);
+});
+
+test("deleteConfig maps resource -> method and rejects unknown", async () => {
+  const { client, calls } = stubClient({ enableDestructive: true });
+  await client.deleteConfig("init_script", 7);
+  await client.deleteConfig("ntp_server", 4);
+  await client.deleteConfig("cron_job", 1);
+  await client.deleteConfig("tunable", 2);
+  assert.deepEqual(calls.map((c) => [c.method, c.params]), [
+    ["initshutdownscript.delete", [7]],
+    ["system.ntpserver.delete", [4]],
+    ["cronjob.delete", [1]],
+    ["tunable.delete", [2]],
+  ]);
+  await assert.rejects(() => client.deleteConfig("bogus", 1));
+});

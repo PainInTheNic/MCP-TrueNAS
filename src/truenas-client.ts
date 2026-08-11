@@ -1490,6 +1490,66 @@ export class TrueNasClient {
     return this.wsOnly("certificate delete", () => this.callJob("certificate.delete", [id]));
   }
 
+  // ------------------------------------------------------------------
+  // Non-network system config mutation (Phase 7). Network/SSH intentionally
+  // excluded so this server can never lock the operator out.
+  // ------------------------------------------------------------------
+
+  async updateSystemGeneral(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("system.general.update", [data]);
+  }
+
+  async updateSystemAdvanced(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("system.advanced.update", [data]);
+  }
+
+  /** mail.update — SMTP settings. Returns the config (the tool strips the password). */
+  async updateEmail(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("mail.update", [data]);
+  }
+
+  async createInitScript(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("initshutdownscript.create", [data]);
+  }
+  async updateInitScript(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("initshutdownscript.update", [id, data]);
+  }
+
+  async createNtpServer(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("system.ntpserver.create", [data]);
+  }
+  async updateNtpServer(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("system.ntpserver.update", [id, data]);
+  }
+
+  async createCronJob(data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("cronjob.create", [data]);
+  }
+  async updateCronJob(id: number, data: Record<string, unknown>): Promise<unknown> {
+    return this.provision("cronjob.update", [id, data]);
+  }
+
+  /** tunable.create / tunable.update — run as @jobs. */
+  async createTunable(data: Record<string, unknown>): Promise<JobOutcome> {
+    return this.wsOnly("tunable create", () => this.callJob("tunable.create", [data]));
+  }
+  async updateTunable(id: number, data: Record<string, unknown>): Promise<JobOutcome> {
+    return this.wsOnly("tunable update", () => this.callJob("tunable.update", [id, data]));
+  }
+
+  private static CONFIG_DELETE: Record<string, { method: string; job: boolean }> = {
+    init_script: { method: "initshutdownscript.delete", job: false },
+    ntp_server: { method: "system.ntpserver.delete", job: false },
+    cron_job: { method: "cronjob.delete", job: false },
+    tunable: { method: "tunable.delete", job: true },
+  };
+
+  async deleteConfig(resource: string, id: number): Promise<unknown> {
+    const spec = TrueNasClient.CONFIG_DELETE[resource];
+    if (!spec) throw new TrueNasError(`Unknown config resource '${resource}'.`);
+    return this.wsOnly(spec.method, () => (spec.job ? this.callJob(spec.method, [id]) : this.call(spec.method, [id])));
+  }
+
   async createSmbShare(opts: {
     path: string;
     name: string;
