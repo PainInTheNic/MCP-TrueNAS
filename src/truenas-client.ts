@@ -1796,6 +1796,15 @@ export class TrueNasClient {
     );
   }
 
+  /**
+   * update.download — download & stage the pending update WITHOUT applying it.
+   * Non-destructive: it only caches the update files; it does NOT create/activate
+   * a boot environment or reboot. Apply later with applyUpdate()/the UI.
+   */
+  async downloadUpdate(): Promise<JobOutcome> {
+    return this.wsOnly("update download", () => this.callJob("update.download", [], 180_000));
+  }
+
   async applyUpdate(): Promise<JobOutcome> {
     return this.wsOnly("update run", () => this.callJob("update.run", [{}]));
   }

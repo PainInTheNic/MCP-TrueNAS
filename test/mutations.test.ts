@@ -551,3 +551,10 @@ test("deleteConfig maps resource -> method and rejects unknown", async () => {
   ]);
   await assert.rejects(() => client.deleteConfig("bogus", 1));
 });
+
+test("downloadUpdate submits update.download with no params (download-only, as a job)", async () => {
+  const { client, calls } = stubClient();
+  await client.downloadUpdate();
+  assert.equal(calls[0].method, "update.download");
+  assert.deepEqual(calls[0].params, []);
+});

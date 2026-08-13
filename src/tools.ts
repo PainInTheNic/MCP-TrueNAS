@@ -3770,6 +3770,45 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }
     );
 
+    // ---------------- download / stage an OS update ----------------
+    server.registerTool(
+      "truenas_download_update",
+      {
+        title: "Download & Stage OS Update",
+        description:
+          "Download and cache the pending TrueNAS update WITHOUT installing it. This is non-destructive: it only " +
+          "stages the update files — it does NOT create/activate a boot environment and does NOT reboot. Use " +
+          "truenas_check_updates first to see what's available, then truenas_apply_update (or the UI's 'Apply " +
+          "Pending Update') to install it later at a time you choose. Runs as a job. Requires TRUENAS_ENABLE_WRITE=1.",
+        inputSchema: z.object({ response_format: responseFormat }),
+        outputSchema: z.object({
+          downloaded: z.boolean(),
+          job_id: z.number().nullable(),
+          state: z.string(),
+          error: z.string().nullable(),
+        }),
+        annotations: SAFE_WRITE,
+      },
+      async ({ response_format }): Promise<ToolResult> => {
+        try {
+          const out = await getClient().downloadUpdate();
+          auditLog({ tool: "truenas_download_update", method: "update.download", target: "system", outcome: out.error ? `error: ${out.error}` : out.state });
+          const downloaded = out.state === "SUCCESS";
+          const structured = { downloaded, job_id: out.jobId, state: out.state, error: out.error };
+          return respond(structured, response_format, () =>
+            out.error
+              ? `Update download failed: ${out.error}`
+              : downloaded
+                ? "Update **downloaded & staged** — not installed. Apply it later with truenas_apply_update or the UI (a reboot is required to install)."
+                : `Update download **${out.state}**${out.jobId ? ` (job ${out.jobId})` : ""} — still running; re-check with truenas_list_jobs.`
+          );
+        } catch (error) {
+          auditLog({ tool: "truenas_download_update", method: "update.download", target: "system", outcome: `error: ${error instanceof Error ? error.message : String(error)}` });
+          return errorResult(error);
+        }
+      }
+    );
+
     // ---------------- create dataset ----------------
     server.registerTool(
       "truenas_create_dataset",

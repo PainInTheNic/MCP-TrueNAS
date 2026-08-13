@@ -126,6 +126,7 @@ the structured result is machine-validated by the MCP client.
 - `truenas_manage_vm` — start / stop / restart / suspend / resume a VM
 - `truenas_create_vm` / `truenas_update_vm` — create a VM shell; change its CPU/memory/boot config
 - `truenas_run_scrub` — start a manual pool scrub
+- `truenas_download_update` — download & **stage** the pending OS update without installing it (no boot-env change, no reboot)
 - `truenas_run_cloudsync_task` / `truenas_run_replication_task` / `truenas_run_rsync_task` — trigger an existing backup task now (by id)
 - `truenas_clone_snapshot` — clone a snapshot into a new dataset (non-destructive; great for file recovery)
 - `truenas_create_rsync_task` / `truenas_update_rsync_task` — define/adjust an rsync backup to another NAS (does not touch local SSH)
@@ -178,7 +179,7 @@ The server is **read-only until you opt in**, in tiers:
 | **Safe write** (reversible) | `TRUENAS_ENABLE_WRITE=1` | not registered unless enabled; audit-logged; never marked read-only |
 | **Destructive** (delete / rollback / reboot) | `TRUENAS_ENABLE_DESTRUCTIVE=1` | the above **plus** a human elicitation confirmation, and **fail-closed** if the client can't prompt |
 
-> **Status:** the full read/write surface is implemented — **47 read, 62 safe-write, 25 destructive** tools (134 total). Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
+> **Status:** the full read/write surface is implemented — **47 read, 63 safe-write, 25 destructive** tools (135 total). Destructive tools appear only when BOTH flags are set, and each requires a human elicitation confirmation (fail-closed if the client can't be prompted).
 
 Being honest about enforcement: MCP has **no protocol-level way to force** human
 confirmation, so the guarantees that actually hold are the ones a client cannot
