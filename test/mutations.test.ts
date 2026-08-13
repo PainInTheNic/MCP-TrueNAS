@@ -558,3 +558,10 @@ test("downloadUpdate submits update.download with no params (download-only, as a
   assert.equal(calls[0].method, "update.download");
   assert.deepEqual(calls[0].params, []);
 });
+
+test("applyUpdate sends update.run with reboot:true (API default is false)", async () => {
+  const { client, calls } = stubClient();
+  await client.applyUpdate();
+  assert.equal(calls[0].method, "update.run");
+  assert.deepEqual(calls[0].params, [{ reboot: true }]);
+});

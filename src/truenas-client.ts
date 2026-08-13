@@ -1805,8 +1805,13 @@ export class TrueNasClient {
     return this.wsOnly("update download", () => this.callJob("update.download", [], 180_000));
   }
 
+  /**
+   * update.run — apply the pending update AND reboot into the new boot environment.
+   * NOTE: the API's `reboot` flag defaults to false (apply-without-reboot); this tool's
+   * contract is "apply and reboot", so we pass reboot:true explicitly.
+   */
   async applyUpdate(): Promise<JobOutcome> {
-    return this.wsOnly("update run", () => this.callJob("update.run", [{}]));
+    return this.wsOnly("update run", () => this.callJob("update.run", [{ reboot: true }]));
   }
 
   /** Close the WebSocket connection and fail any in-flight calls (shutdown). */
