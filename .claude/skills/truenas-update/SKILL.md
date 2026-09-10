@@ -95,10 +95,13 @@ force-kill, especially not PostgreSQL.
 
 ### 3d. Apply + reboot — use the script, not a nonexistent tool
 
-**`truenas_apply_update` does not exist as an MCP tool, on purpose.** `update.run` is
-destructive-tier (it reboots the host) and `TRUENAS_ENABLE_DESTRUCTIVE` is
-intentionally left unset in `.env` so no destructive tool ever registers. Do not
-search for it, do not try to flip the env flag and reconnect — use the script:
+**`truenas_apply_update` exists in source (`src/tools.ts`) but never registers in
+this session, on purpose.** It's destructive-tier (`update.run` reboots the host),
+gated behind `TRUENAS_ENABLE_DESTRUCTIVE` (intentionally left unset in `.env`) plus
+a per-call MCP elicitation confirmation. Flipping the flag and reconnecting isn't a
+practical path here anyway (no interactive `/mcp` reconnect in this environment, and
+elicitation fails closed without an interactive client). Don't spend time on that
+path — use the script:
 
 ```bash
 cd "C:\Users\Nic\Documents\Claude\Code\MCP-TrueNAS"
