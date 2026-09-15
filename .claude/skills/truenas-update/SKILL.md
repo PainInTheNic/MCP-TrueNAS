@@ -104,9 +104,14 @@ elicitation fails closed without an interactive client). Don't spend time on tha
 path — use the script:
 
 ```bash
-cd "C:\Users\Nic\Documents\Claude\Code\MCP-TrueNAS"
 node scripts/apply-staged-update.mjs
 ```
+
+Invoke it as that **bare command, with no `cd` prefix and no wrapper** — the session's
+working directory is already the repo root (both interactive and scheduled runs start
+there), and the permission allowlist entry `Bash(node scripts/apply-staged-update.mjs:*)`
+only matches when the command begins with `node ...`. Prefixing `cd "…" &&` would make
+an unattended run stall on a permission prompt it can't answer.
 
 Run this via the Bash tool with `run_in_background: true` and `timeout: 600000` — it
 blocks through the full apply → reboot → post-flight cycle (typically 5–8 minutes).
