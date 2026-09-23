@@ -40,6 +40,11 @@ truenas_list_apps                (apps: upgrade_available per app)
 If both report nothing pending: tell Nic the system is fully current and stop. No CM
 doc for "nothing happened."
 
+Installed apps on this box (as of 2026-09-23): `open-speed-test`, `tailscale`,
+`grafana`. Treat `truenas_list_apps` as the source of truth — if its list differs
+from this one, work from what it returns and mention the difference to Nic so this
+line can be updated.
+
 ## Step 2 — Apply app updates (do this before the OS update — lower risk, isolates failures)
 
 For each app with `upgrade_available: true`:
@@ -147,9 +152,10 @@ Read the script's completed output for:
       manually with `truenas_manage_vm id=<id> action=start`, in the **reverse**
       shutdown order (PostgreSQL → HomeAssistant → Plex → Portal) if more than one
       needs a manual nudge.
-- [ ] Both apps `RUNNING` (a `DEPLOYING` blip during the reboot-driven app restart is
-      normal — recheck with `truenas_get_app` if the script's snapshot caught it
-      mid-transition).
+- [ ] All apps `RUNNING` — every app from Step 1's `truenas_list_apps`, currently
+      `open-speed-test`, `tailscale` and `grafana` (the script flags any that aren't
+      with `⚠️`). A `DEPLOYING` blip during the reboot-driven app restart is normal —
+      recheck with `truenas_get_app` if the script's snapshot caught it mid-transition.
 - [ ] 0 active alerts.
 - [ ] `update.status` reports fully current.
 

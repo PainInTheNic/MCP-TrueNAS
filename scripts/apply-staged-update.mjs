@@ -101,6 +101,10 @@ async function applyAndMonitor() {
   log(`VMs: ${vms.map((v) => `${v.name}=${v.status?.state}`).join(", ")}`);
   const apps = await client.call("app.query", [[], {}]);
   log(`apps: ${apps.map((a) => `${a.name}=${a.state}`).join(", ")}`);
+  const appsNotRunning = apps.filter((a) => a.state !== "RUNNING");
+  log(appsNotRunning.length
+    ? `⚠️ apps not RUNNING: ${appsNotRunning.map((a) => a.name).join(", ")} — recheck (DEPLOYING may just be mid-restart)`
+    : `all ${apps.length} apps RUNNING ✅`);
   const alerts = await client.call("alert.list");
   const active = alerts.filter((a) => !a.dismissed);
   log(`active alerts: ${active.length}`);
