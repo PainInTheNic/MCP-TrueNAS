@@ -235,11 +235,10 @@ settle, etc.) even if it was resolved.
   shutdown stalls.
 - **If a pool is unhealthy, there are active alerts, or a job is running** at the 3b
   pre-flight gate, stop and report — don't reboot through it.
-- **Pushing repo changes** (if this script or skill itself is edited) needs the
-  `gh` account switched to `PainInTheNic` first (`gh auth switch --user
-  PainInTheNic`), then switched back to `Cabinet-Compass` after
-  (`gh auth switch --user Cabinet-Compass`) — the default active account can't push
-  to this repo.
+- **Pushing repo changes** (if this script or skill itself is edited) uses the
+  `PainInTheNic` GitHub account, which is the only `gh` login and is wired into git
+  via `gh auth setup-git` — a plain `git push origin main` works. `gh` lives at
+  `/opt/homebrew/bin/gh`, which may not be on the shell's PATH.
 - **Rollback** (OS only): the prior version stays as a boot environment. Reboot,
   select it at the boot menu, reactivate if desired via System → Boot → Boot
   Environments. No data restore needed. Full detail in
