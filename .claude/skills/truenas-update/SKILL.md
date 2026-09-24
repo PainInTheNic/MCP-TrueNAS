@@ -246,8 +246,8 @@ settle, etc.) even if it was resolved.
 
 ## Reference files
 
-- `TrueNAS-OS-Update-Runbook.md` (repo-adjacent, in `C:\Users\Nic\Documents\Claude\`)
-  — the longer-form narrative runbook this skill is distilled from. Consult it for
+- `TrueNAS-OS-Update-Runbook.md` (repo-adjacent; lived in `C:\Users\Nic\Documents\Claude\`
+  on the old Windows PC — not yet copied to this Mac) — the longer-form narrative runbook this skill is distilled from. Consult it for
   anything this skill doesn't cover (e.g. full rollback walkthrough, IPMI recovery).
 - `scripts/apply-staged-update.mjs` — the apply+reboot script itself, committed to
   this repo. Fix bugs in place rather than reconstructing the call sequence from

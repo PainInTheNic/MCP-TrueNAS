@@ -14,15 +14,15 @@
 // USAGE (from the repo root, after `npm run build`):
 //   node scripts/apply-staged-update.mjs
 //
-// Windows/PowerShell note: run it exactly as above (relative path) or with an absolute
-// Windows path — Node resolves that fine for the script argument itself. The gotcha is
-// inside THIS file's own import below, which must use a file:// URL, not a bare
-// Windows path (C:/...), or Node's ESM loader throws ERR_UNSUPPORTED_ESM_URL_SCHEME.
+// Paths below resolve relative to this file, so the script works from any clone location
+// on Windows or macOS. (Never put a bare Windows path like C:/... in an ESM import — Node
+// throws ERR_UNSUPPORTED_ESM_URL_SCHEME; relative specifiers avoid that entirely.)
 
-import { TrueNasClient } from "file:///C:/Users/Nic/Documents/Claude/Code/MCP-TrueNAS/dist/truenas-client.js";
+import { TrueNasClient } from "../dist/truenas-client.js";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-process.loadEnvFile("C:/Users/Nic/Documents/Claude/Code/MCP-TrueNAS/.env");
+process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
