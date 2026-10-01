@@ -1,16 +1,22 @@
 ---
 name: truenas-update
-description: Check for and apply TrueNAS SCALE OS + app updates, with ordered VM shutdown, verification, and change-management documentation. Use when the user asks to check for TrueNAS/app updates, apply an update, or run the update cycle on the truenas box (192.168.0.253).
+description: Check for and apply TrueNAS SCALE OS + app updates, with ordered VM shutdown, verification, and change-management documentation. Use when the user asks to check for TrueNAS/app updates, apply an update, run the update cycle, or perform the scheduled maintenance reboot on the truenas box (192.168.0.253).
 user-invocable: true
 ---
 
 # /truenas-update — TrueNAS Update Cycle (OS + Apps)
 
 Runs the full, repeatable update procedure for Nic's TrueNAS SCALE box: check what's
-pending, apply app updates, apply the OS update (staged download → ordered VM
-shutdown → apply+reboot → verify), and file a Change Management record in Google
-Drive for every change made — no change is too minor to document (see
-`feedback-document-every-change` memory).
+pending, apply app updates, **install** the OS update without rebooting, notify Nic,
+and — only when Nic asks, in a maintenance window — do the ordered VM shutdown →
+reboot → verify. A Change Management record goes into Google Drive for every change
+made — no change is too minor to document (see `feedback-document-every-change`
+memory).
+
+> **The box hosts a Production VM (`ksi_webapp`, id 18) since 2026-10-01. The host
+> is NEVER rebooted automatically.** Routine/unattended runs stop after installing the
+> OS update and tell Nic a reboot is pending. The reboot (Step 4) runs only when Nic
+> explicitly asks for it in this conversation or schedules it directly.
 
 This skill exists so the procedure is **mechanical, not re-derived**. Every command
 shape, tool-param name, and gotcha below was hard-won across real runs (2026-08-13,
@@ -20,13 +26,16 @@ Arguments passed: `$ARGUMENTS`
 
 ## Dispatch on arguments
 
-- **No args / "full" / "update"** → run the complete cycle below: check, apply apps,
-  apply OS if pending, verify, document.
-- **"check" / "status" / "dry-run"** → Step 1 only. Report what's pending. Make no
-  changes, file no CM doc.
+- **No args / "full" / "update"** → Steps 1–3 and 5–6: check, apply apps, install OS
+  update if pending (no reboot), document, notify. **Never Step 4.**
+- **"check" / "status" / "dry-run"** → Step 1 only. Report what's pending (including
+  a pending reboot). Make no changes, file no CM doc.
 - **"apps" / "apps-only"** → Step 1 + Step 2 only. Skip the OS update even if one is
   pending (report it as still pending).
 - **"os" / "os-only"** → Step 1 + Step 3 only (skip app updates even if pending).
+- **"reboot" / "maintenance"** → Step 4 only (plus its CM doc and report). Only when
+  Nic has asked for the reboot. Never inferred from a routine/scheduled prompt that
+  merely says "install updates".
 
 ---
 
@@ -37,17 +46,27 @@ truenas_check_updates            (OS: current version, new version if any, reboo
 truenas_list_apps                (apps: upgrade_available per app)
 ```
 
-If both report nothing pending: tell Nic the system is fully current and stop. No CM
-doc for "nothing happened."
+- If `reboot_required: true` — a previously installed update is still waiting on its
+  reboot. Do **not** install another OS update on top of it (the script refuses anyway).
+  Include "reboot still pending since <date of the install CM doc>" in the report to
+  Nic every run until it's done.
+- If nothing is pending and no reboot is pending: tell Nic the system is fully current
+  and stop. No CM doc for "nothing happened."
 
 Installed apps on this box (as of 2026-09-23): `open-speed-test`, `tailscale`,
 `grafana`. Treat `truenas_list_apps` as the source of truth — if its list differs
 from this one, work from what it returns and mention the difference to Nic so this
 line can be updated.
 
+VMs on this box (as of 2026-10-01): `homeassistant=1, plex=3, postgresql=11,
+portal=14, ksi_webapp=18` (Production). Same rule — if `truenas_list_vms` shows a VM
+not listed here, mention it to Nic and **don't run Step 4** until its place in the
+shutdown order is known.
+
 ## Step 2 — Apply app updates (do this before the OS update — lower risk, isolates failures)
 
-For each app with `upgrade_available: true`:
+App upgrades restart only that app's containers, not the host or any VM, so they stay
+automatic. For each app with `upgrade_available: true`:
 
 ```
 truenas_manage_app app=<name> action=upgrade
@@ -61,9 +80,9 @@ is normal — don't report failure on that alone; check again a few seconds late
 File a CM doc for each app updated (template at the bottom of this file) before
 moving to Step 3.
 
-## Step 3 — Apply the OS update (if one is pending)
+## Step 3 — Install the OS update (if one is pending) — NO reboot
 
-### 3a. Stage it (non-destructive, no reboot)
+### 3a. Stage it (non-destructive)
 
 ```
 truenas_download_update
@@ -74,95 +93,111 @@ truenas_download_update
 ```
 truenas_list_pools                          → both SSD and HDD: status=ONLINE, healthy=true
 truenas_list_alerts min_level=WARNING       → count: 0
-truenas_list_jobs state=RUNNING             → count: 0  (never reboot mid-scrub/replication)
+truenas_list_jobs state=RUNNING             → count: 0
 ```
 
-If any of these fail the gate, **stop and tell Nic** — don't reboot into an unhealthy
-state.
+If any of these fail the gate, **stop and tell Nic**.
 
-### 3c. Shut down VMs — exact order, verify STOPPED before each next step
+### 3c. Install into a new boot environment (VMs keep running)
 
-**Portal → Plex → HomeAssistant → PostgreSQL** (dependents first, database last — a
-clean guest shutdown lets Postgres checkpoint; never force-kill it).
+```bash
+node scripts/apply-staged-update.mjs --install
+```
 
-VM ids on this box: `portal=14, plex=3, homeassistant=1, postgresql=11` (confirm with
-`truenas_list_vms` if this ever changes).
+Invoke it as that **exact bare command — no `cd` prefix, no wrapper, no other flag**.
+The session's working directory is already the repo root, and the permission
+allowlist entry is exactly `Bash(node scripts/apply-staged-update.mjs --install)`;
+anything else stalls an unattended run on a prompt. (`--reboot` is deliberately *not*
+allowlisted — see Step 4.) Run it via Bash with `timeout: 600000`; it usually finishes
+in a few minutes.
+
+The script: checks pools are healthy and no reboot is already pending, runs
+`update.run({reboot:false})` and polls the job to `SUCCESS`, then confirms
+`system.reboot.info` now reports a pending reboot and lists boot environments.
+Running version stays unchanged until reboot — that's expected.
+
+Note the consequence: from here on, **any** reboot (power blip, manual, crash) boots
+into the new version. That's accepted — it's the point of installing ahead of the
+window, and the prior BE stays available for rollback.
+
+### 3d. Notify Nic
+
+File the install CM doc (Status: `Installed - reboot pending`), then make the report
+lead with: **"OS <old> → <new> installed, reboot pending — tell me when to run the
+maintenance reboot."** Stop there. Don't stop VMs, don't reboot, don't create a
+scheduled task for the reboot unless Nic asks.
+
+## Step 4 — Maintenance reboot (ONLY when Nic asks)
+
+Run this only on Nic's explicit request (e.g. "do the TrueNAS reboot now", or a
+one-time scheduled task Nic asked you to create for a specific window).
+
+### 4a. Pre-flight gate
+
+Same three checks as 3b (pools, alerts, running jobs — never reboot mid-scrub or
+mid-replication), plus `truenas_check_updates` → `reboot_required: true` (if not,
+confirm with Nic that a plain reboot is still wanted). If anything fails, stop and tell
+Nic.
+
+### 4b. Shut down VMs — exact order, verify STOPPED before each next step
+
+**Portal → Plex → HomeAssistant → PostgreSQL → ksi_webapp (Production, last)**.
+Dependents go before PostgreSQL so it can checkpoint cleanly; ksi_webapp runs its own
+dependencies and goes last to minimize Production downtime.
 
 ```
 truenas_manage_vm id=14 action=stop   → poll truenas_list_vms until portal STOPPED
 truenas_manage_vm id=3  action=stop   → poll until plex STOPPED (can take up to ~90s, that's normal)
 truenas_manage_vm id=1  action=stop   → poll until homeassistant STOPPED
 truenas_manage_vm id=11 action=stop   → poll until postgresql STOPPED
+truenas_manage_vm id=18 action=stop   → poll until ksi_webapp STOPPED   ← start of Production downtime
 ```
 
 If a VM won't reach `STOPPED` within ~2 minutes, **halt and investigate** — do not
-force-kill, especially not PostgreSQL.
+force-kill, especially not PostgreSQL or ksi_webapp. If you halt after some VMs are
+down, restart them (ksi_webapp first) so nothing stays down while you wait on Nic.
 
-### 3d. Apply + reboot — use the script, not a nonexistent tool
-
-**`truenas_apply_update` exists in source (`src/tools.ts`) but never registers in
-this session, on purpose.** It's destructive-tier (`update.run` reboots the host),
-gated behind `TRUENAS_ENABLE_DESTRUCTIVE` (intentionally left unset in `.env`) plus
-a per-call MCP elicitation confirmation. Flipping the flag and reconnecting isn't a
-practical path here anyway (no interactive `/mcp` reconnect in this environment, and
-elicitation fails closed without an interactive client). Don't spend time on that
-path — use the script:
+### 4c. Reboot
 
 ```bash
-node scripts/apply-staged-update.mjs
+node scripts/apply-staged-update.mjs --reboot
 ```
 
-Invoke it as that **bare command, with no `cd` prefix and no wrapper** — the session's
-working directory is already the repo root (both interactive and scheduled runs start
-there), and the permission allowlist entry `Bash(node scripts/apply-staged-update.mjs:*)`
-only matches when the command begins with `node ...`. Prefixing `cd "…" &&` would make
-an unattended run stall on a permission prompt it can't answer.
+Same bare-command rule as 3c. It is not allowlisted, so it prompts in an interactive
+session (Nic is present — that's the confirmation). If Nic asked for an **unattended**
+scheduled reboot, add `Bash(node scripts/apply-staged-update.mjs --reboot)` to
+`.claude/settings.local.json` for that window and remove it again in the post-reboot
+run.
 
-Run this via the Bash tool with `run_in_background: true` and `timeout: 600000` — it
-blocks through the full apply → reboot → post-flight cycle (typically 5–8 minutes).
-Do one early read of the task's output file a few seconds in, just to confirm
-pre-flight passed and the job submitted (`apply [RUNNING] ...`). After that, **wait
-for the background-task completion notification** — do not poll with repeated short
-sleeps (the Bash tool blocks `sleep 90`-then-check patterns for exactly this reason;
-use a single short check or just wait).
+Run via Bash with `run_in_background: true` and `timeout: 600000` (typically 5–8
+minutes). Do one early read of the output a few seconds in to confirm pre-flight
+passed, then **wait for the completion notification** — don't poll with repeated
+sleeps.
 
-The script itself:
-- Refuses to run if any pool is unhealthy or any VM is still `RUNNING` (its own
-  pre-flight, independent of 3b/3c above).
-- Submits `update.run({reboot:true})`, polls the job to `SUCCESS`.
-- A dropped WebSocket connection during this phase is **expected** (the reboot itself)
-  — the script treats it as "reboot underway," not a failure.
-- Waits (up to 15 min) for `system.info` to answer again, then prints a full
-  post-flight report: version, both pools' health, all VM states, all app states,
-  active alert count, `update.status`, and the boot-environment list.
+The script refuses unless every VM is `STOPPED` and pools are healthy, calls
+`system.reboot`, treats the dropped WebSocket as "reboot underway", waits up to 15 min
+for `system.info` to answer, then prints the post-flight report.
 
-**If the script's own `import` line is ever copied elsewhere:** Node's ESM loader
-rejects a bare Windows path (`C:/...`) with `ERR_UNSUPPORTED_ESM_URL_SCHEME` — it
-must be a `file:///C:/...` URL. The committed script already has this right; this is
-only relevant if writing a new one-off variant.
+### 4d. Post-flight verification
 
-### 3e. Post-flight verification
-
-Read the script's completed output for:
-- [ ] Version changed to the target (script flags `⚠️ unchanged` if not — treat that
-      as a failure needing investigation, not a pass).
+- [ ] **ksi_webapp `RUNNING` first** — the script flags it. If it isn't running,
+      start it immediately (`truenas_manage_vm id=18 action=start`) before anything
+      else.
+- [ ] Version changed to the target (`⚠️ unchanged` = failure needing investigation).
 - [ ] Both pools healthy, 0 scan errors.
-- [ ] All 4 VMs `RUNNING` — they have `autostart=true` so this is normally automatic.
-      If any VM is not `RUNNING` a couple minutes after the box comes back, start it
-      manually with `truenas_manage_vm id=<id> action=start`, in the **reverse**
-      shutdown order (PostgreSQL → HomeAssistant → Plex → Portal) if more than one
-      needs a manual nudge.
-- [ ] All apps `RUNNING` — every app from Step 1's `truenas_list_apps`, currently
-      `open-speed-test`, `tailscale` and `grafana` (the script flags any that aren't
-      with `⚠️`). A `DEPLOYING` blip during the reboot-driven app restart is normal —
-      recheck with `truenas_get_app` if the script's snapshot caught it mid-transition.
-- [ ] 0 active alerts.
-- [ ] `update.status` reports fully current.
+- [ ] All 5 VMs `RUNNING` — all have `autostart=true`, and TrueNAS starts them
+      together, so normally nothing to do. If any still need a manual start after a
+      couple of minutes: **ksi_webapp first**, then PostgreSQL → HomeAssistant →
+      Plex → Portal.
+- [ ] All apps `RUNNING` (currently `open-speed-test`, `tailscale`, `grafana`). A
+      `DEPLOYING` blip is normal — recheck with `truenas_get_app`.
+- [ ] 0 active alerts; no reboot still pending; `update.status` fully current.
 
-## Step 4 — File Change Management records
+## Step 5 — File Change Management records
 
-**Every change gets its own CM doc — apps and OS are separate records, even in the
-same session.** No skipping "minor" ones (see `feedback-document-every-change`
+**Every change gets its own CM doc** — each app upgrade, the OS install, and the
+maintenance reboot are separate records (the reboot record references the install
+record's CHG number). No skipping "minor" ones (see `feedback-document-every-change`
 memory — this was corrected once already, don't repeat it).
 
 Use the Google Drive MCP `create_file` tool. **Exact parameter names** (a past
@@ -178,19 +213,19 @@ textContent:      <the CM doc body, markdown — see template below>
 ```
 
 Number sequentially per day: `-001`, `-002`, ... across *all* changes made that day
-(apps and OS share the same daily counter — check what's already in the folder for
-that date if picking up a partial day).
+(apps, OS install and reboot share the same daily counter — check what's already in
+the folder for that date if picking up a partial day).
 
 ### CM doc template
 
 ```markdown
 # CHG-YYYY.MM.DD-NNN: <short title>
 
-Date: YYYY-MM-DD Category: Infrastructure Risk Level: <Low|Medium> Status: Completed - verified
+Date: YYYY-MM-DD Category: Infrastructure Risk Level: <Low|Medium> Status: <Completed - verified | Installed - reboot pending>
 Performed By: Claude Code (AI Agent) via mcp-truenas Approved By: Nic
 
 ## 1. Description and Background
-<why this change happened — routine check, what was found pending>
+<why this change happened — routine check, what was found pending; for a reboot, the install CHG it completes>
 
 ## 2. Changes Made
 | Item | Before | After | Result |
@@ -201,7 +236,7 @@ Performed By: Claude Code (AI Agent) via mcp-truenas Approved By: Nic
 <the actual tool calls / script invocation, in sequence>
 
 ## 4. Verification and Validation
-<what was checked post-change and what it showed>
+<what was checked post-change and what it showed; for reboots, Production (ksi_webapp) downtime window>
 
 ## 5. Regression Risk and Rollback Plan
 <risk level and why; rollback steps — for OS updates, the retained prior boot environment>
@@ -210,17 +245,21 @@ Performed By: Claude Code (AI Agent) via mcp-truenas Approved By: Nic
 Document generated by Claude Code - YYYY-MM-DD
 ```
 
-## Step 5 — Report back to Nic
+## Step 6 — Report back to Nic
 
 Concise summary: what was checked, what was updated (before → after versions), that
-verification passed, and links to the CM doc(s) filed. Mention explicitly if
-anything needed manual intervention (a VM that didn't autostart, an app that didn't
-settle, etc.) even if it was resolved.
+verification passed, and links to the CM doc(s) filed. If an OS update is installed
+and awaiting reboot, say so first. Mention explicitly if anything needed manual
+intervention (a VM that didn't autostart, an app that didn't settle, etc.) even if it
+was resolved.
 
 ---
 
 ## Standing safety rules (apply throughout, not just during updates)
 
+- **Never reboot the host outside Step 4**, and never run Step 4 without Nic's
+  explicit request. This includes not enabling `TRUENAS_ENABLE_DESTRUCTIVE` to reach
+  `truenas_apply_update` (which reboots unconditionally).
 - **Never dump `.env` raw** (`cat`, `grep` without airtight redaction) to check a
   value — a redaction pattern failing silently leaked the live TrueNAS API key into
   a conversation once already. Check presence/length only:
@@ -231,24 +270,26 @@ settle, etc.) even if it was resolved.
   around the LAN path first — this caused a false "host is down" alarm once. Only
   escalate to "check the physical machine" if ping also fails and the user isn't on
   a VPN that could explain it.
-- **Never force-kill a VM**, especially PostgreSQL — halt and ask if graceful
-  shutdown stalls.
-- **If a pool is unhealthy, there are active alerts, or a job is running** at the 3b
-  pre-flight gate, stop and report — don't reboot through it.
+- **Never force-kill a VM**, especially PostgreSQL or ksi_webapp — halt and ask if
+  graceful shutdown stalls.
+- **If a pool is unhealthy, there are active alerts, or a job is running** at a
+  pre-flight gate, stop and report.
 - **Pushing repo changes** (if this script or skill itself is edited) uses the
   `PainInTheNic` GitHub account, which is the only `gh` login and is wired into git
   via `gh auth setup-git` — a plain `git push origin main` works. `gh` lives at
   `/opt/homebrew/bin/gh`, which may not be on the shell's PATH.
 - **Rollback** (OS only): the prior version stays as a boot environment. Reboot,
   select it at the boot menu, reactivate if desired via System → Boot → Boot
-  Environments. No data restore needed. Full detail in
-  `TrueNAS-OS-Update-Runbook.md` Part 5.
+  Environments. No data restore needed. Before the reboot has happened, an installed
+  update can be backed out by re-activating the current BE in that same screen.
+  Full detail in `TrueNAS-OS-Update-Runbook.md` Part 5.
 
 ## Reference files
 
 - `TrueNAS-OS-Update-Runbook.md` (repo-adjacent; lived in `C:\Users\Nic\Documents\Claude\`
-  on the old Windows PC — not yet copied to this Mac) — the longer-form narrative runbook this skill is distilled from. Consult it for
-  anything this skill doesn't cover (e.g. full rollback walkthrough, IPMI recovery).
-- `scripts/apply-staged-update.mjs` — the apply+reboot script itself, committed to
+  on the old Windows PC — not yet copied to this Mac) — the longer-form narrative
+  runbook this skill is distilled from. Predates the no-auto-reboot rule; where they
+  differ, this skill wins.
+- `scripts/apply-staged-update.mjs` — `--install` / `--reboot` script, committed to
   this repo. Fix bugs in place rather than reconstructing the call sequence from
   scratch if TrueNAS's API shape ever changes.
