@@ -7,16 +7,20 @@ user-invocable: true
 # /truenas-update — TrueNAS Update Cycle (OS + Apps)
 
 Runs the full, repeatable update procedure for Nic's TrueNAS SCALE box: check what's
-pending, apply app updates, **install** the OS update without rebooting, notify Nic,
-and — only when Nic asks, in a maintenance window — do the ordered VM shutdown →
-reboot → verify. A Change Management record goes into Google Drive for every change
+pending, apply app updates, **install** the OS update, and — only inside the Production
+maintenance window — do the ordered VM shutdown → reboot → verify. A Change Management record goes into Google Drive for every change
 made — no change is too minor to document (see `feedback-document-every-change`
 memory).
 
-> **The box hosts a Production VM (`ksi_webapp`, id 18) since 2026-10-01. The host
-> is NEVER rebooted automatically.** Routine/unattended runs stop after installing the
-> OS update and tell Nic a reboot is pending. The reboot (Step 4) runs only when Nic
-> explicitly asks for it in this conversation or schedules it directly.
+> **The box hosts a Production VM (`ksi_webapp`, id 18) since 2026-10-01. The host is
+> rebooted ONLY inside the Production maintenance window: Sundays 21:00–24:00
+> America/New_York** (Nic's policy, 2026-10-05; app users are told to save and log
+> off before 21:00 on Sundays). Inside the window a run, attended or unattended, may
+> reboot when an installed update needs it (Step 4). Outside the window nothing ever
+> reboots or stops a VM; the run installs, reports "reboot pending", and the next
+> Sunday window picks it up. A reboot must **start** by 23:30 so VMs are back and
+> verified before midnight. `scripts/apply-staged-update.mjs` enforces the window
+> itself: `--check-window` and `--reboot` both refuse outside it.
 
 This skill exists so the procedure is **mechanical, not re-derived**. Every command
 shape, tool-param name, and gotcha below was hard-won across real runs (2026-08-13,
@@ -26,16 +30,17 @@ Arguments passed: `$ARGUMENTS`
 
 ## Dispatch on arguments
 
-- **No args / "full" / "update"** → Steps 1–3 and 5–6: check, apply apps, install OS
-  update if pending (no reboot), document, notify. **Never Step 4.**
+- **No args / "full" / "update"** → Steps 1–3, then Step 4 **only if** a reboot is
+  pending and `--check-window` exits 0, then Steps 5–6. Outside the window: no Step 4.
+  Report the reboot as pending for the next Sunday window.
 - **"check" / "status" / "dry-run"** → Step 1 only. Report what's pending (including
   a pending reboot). Make no changes, file no CM doc.
 - **"apps" / "apps-only"** → Step 1 + Step 2 only. Skip the OS update even if one is
   pending (report it as still pending).
 - **"os" / "os-only"** → Step 1 + Step 3 only (skip app updates even if pending).
-- **"reboot" / "maintenance"** → Step 4 only (plus its CM doc and report). Only when
-  Nic has asked for the reboot. Never inferred from a routine/scheduled prompt that
-  merely says "install updates".
+- **"reboot" / "maintenance"** → Step 4 only (plus its CM doc and report). Still
+  window-bound. If Nic asks outside the window, tell him the script refuses until
+  Sunday 21:00 ET. Don't try to get around it.
 
 ---
 
@@ -62,8 +67,8 @@ difference in the report so this line can be refreshed.
 
 VMs on this box (as of 2026-10-01): `homeassistant=1, plex=3, postgresql=11,
 portal=14, ksi_webapp=18` (Production). Same rule — if `truenas_list_vms` shows a VM
-not listed here, mention it to Nic and **don't run Step 4** until its place in the
-shutdown order is known.
+not listed here, mention it to Nic and **don't run Step 4**, even in the window,
+until its place in the shutdown order is known.
 
 ## Step 2 — Apply app updates (do this before the OS update — lower risk, isolates failures)
 
@@ -110,8 +115,8 @@ node scripts/apply-staged-update.mjs --install
 Invoke it as that **exact bare command — no `cd` prefix, no wrapper, no other flag**.
 The session's working directory is already the repo root, and the permission
 allowlist entry is exactly `Bash(node scripts/apply-staged-update.mjs --install)`;
-anything else stalls an unattended run on a prompt. (`--reboot` is deliberately *not*
-allowlisted — see Step 4.) Run it via Bash with `timeout: 600000`; it usually finishes
+anything else stalls an unattended run on a prompt. (`--check-window` and `--reboot`
+are allowlisted the same way, as exact bare commands. See Step 4.) Run it via Bash with `timeout: 600000`; it usually finishes
 in a few minutes.
 
 The script: checks pools are healthy and no reboot is already pending, runs
@@ -123,24 +128,32 @@ Note the consequence: from here on, **any** reboot (power blip, manual, crash) b
 into the new version. That's accepted — it's the point of installing ahead of the
 window, and the prior BE stays available for rollback.
 
-### 3d. Notify Nic
+### 3d. Document, then decide on the reboot
 
-File the install CM doc (Status: `Installed - reboot pending`), then make the report
-lead with: **"OS <old> → <new> installed, reboot pending — tell me when to run the
-maintenance reboot."** Stop there. Don't stop VMs, don't reboot, don't create a
-scheduled task for the reboot unless Nic asks.
+File the install CM doc (Status: `Installed - reboot pending`). Then run
+`node scripts/apply-staged-update.mjs --check-window` (exact bare command):
 
-## Step 4 — Maintenance reboot (ONLY when Nic asks)
+- **Exit 0 (in window)** → continue to Step 4 in this same run.
+- **Exit 3 (outside window)** → stop. The report leads with: **"OS <old> → <new>
+  installed, reboot pending — will reboot in the next Sunday 21:00–24:00 ET window."**
+  Don't stop VMs and don't reboot.
 
-Run this only on Nic's explicit request (e.g. "do the TrueNAS reboot now", or a
-one-time scheduled task Nic asked you to create for a specific window).
+## Step 4 — Maintenance reboot (Production window only)
+
+Runs whenever a reboot is pending (`reboot_required: true`, from this run's install or
+an earlier one) **and** the window is open. No separate approval is needed inside the
+window. Nic's window policy is the approval. Outside the window, never.
 
 ### 4a. Pre-flight gate
 
-Same three checks as 3b (pools, alerts, running jobs — never reboot mid-scrub or
-mid-replication), plus `truenas_check_updates` → `reboot_required: true` (if not,
-confirm with Nic that a plain reboot is still wanted). If anything fails, stop and tell
-Nic.
+**First:** `node scripts/apply-staged-update.mjs --check-window` must exit 0. Don't
+stop a single VM unless it does. VM shutdown is Production downtime too.
+
+Then the same three checks as 3b (pools, alerts, running jobs — never reboot mid-scrub or
+mid-replication), plus `truenas_check_updates` → `reboot_required: true`. In an unattended run, if no
+reboot is pending, skip Step 4: there's no reason to take Production down. If Nic
+asked for a plain reboot in an interactive session, go ahead. If anything fails, stop
+and tell Nic.
 
 ### 4b. Shut down VMs — exact order, verify STOPPED before each next step
 
@@ -166,18 +179,20 @@ down, restart them (ksi_webapp first) so nothing stays down while you wait on Ni
 node scripts/apply-staged-update.mjs --reboot
 ```
 
-Same bare-command rule as 3c. It is not allowlisted, so it prompts in an interactive
-session (Nic is present — that's the confirmation). If Nic asked for an **unattended**
-scheduled reboot, add `Bash(node scripts/apply-staged-update.mjs --reboot)` to
-`.claude/settings.local.json` for that window and remove it again in the post-reboot
-run.
+Same bare-command rule as 3c. It's allowlisted as exactly
+`Bash(node scripts/apply-staged-update.mjs --reboot)` so the Sunday run doesn't stall
+on a prompt. The script's own window guard is the safety net. Don't loosen it or
+work around it.
 
 Run via Bash with `run_in_background: true` and `timeout: 600000` (typically 5–8
 minutes). Do one early read of the output a few seconds in to confirm pre-flight
 passed, then **wait for the completion notification** — don't poll with repeated
 sleeps.
 
-The script refuses unless every VM is `STOPPED` and pools are healthy, calls
+The script refuses outside the window (it checks at start and again just before
+`system.reboot`, with the 23:30 cutoff), and refuses unless every VM is `STOPPED` and
+pools are healthy. If the window check fails after VMs are already stopped, start them
+again right away (ksi_webapp first) and report. Then it calls
 `system.reboot`, treats the dropped WebSocket as "reboot underway", waits up to 15 min
 for `system.info` to answer, then prints the post-flight report.
 
@@ -230,6 +245,7 @@ Performed By: Claude Code (AI Agent) via mcp-truenas Approved By: Nic
 
 ## 1. Description and Background
 <why this change happened — routine check, what was found pending; for a reboot, the install CHG it completes>
+<for an unattended window reboot: "Approved under the standing Production maintenance window (Sun 21:00–24:00 ET)">
 
 ## 2. Changes Made
 | Item | Before | After | Result |
@@ -261,8 +277,8 @@ was resolved.
 
 ## Standing safety rules (apply throughout, not just during updates)
 
-- **Never reboot the host outside Step 4**, and never run Step 4 without Nic's
-  explicit request. This includes not enabling `TRUENAS_ENABLE_DESTRUCTIVE` to reach
+- **Never reboot the host or stop a VM outside the Sunday 21:00–24:00 ET window**,
+  and never outside Step 4. Never edit or bypass the script's window guard. This includes not enabling `TRUENAS_ENABLE_DESTRUCTIVE` to reach
   `truenas_apply_update` (which reboots unconditionally).
 - **Never dump `.env` raw** (`cat`, `grep` without airtight redaction) to check a
   value — a redaction pattern failing silently leaked the live TrueNAS API key into
@@ -292,8 +308,8 @@ was resolved.
 
 - `TrueNAS-OS-Update-Runbook.md` (repo-adjacent; lived in `C:\Users\Nic\Documents\Claude\`
   on the old Windows PC — not yet copied to this Mac) — the longer-form narrative
-  runbook this skill is distilled from. Predates the no-auto-reboot rule; where they
+  runbook this skill is distilled from. Predates the maintenance-window rule; where they
   differ, this skill wins.
-- `scripts/apply-staged-update.mjs` — `--install` / `--reboot` script, committed to
+- `scripts/apply-staged-update.mjs` — `--install` / `--check-window` / `--reboot` script, committed to
   this repo. Fix bugs in place rather than reconstructing the call sequence from
   scratch if TrueNAS's API shape ever changes.

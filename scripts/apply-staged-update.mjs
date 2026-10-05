@@ -8,18 +8,24 @@
 // with its own pre-flight safety gates.
 //
 // TWO MODES — the box hosts a Production VM (ksi_webapp), so installing and rebooting
-// are deliberately split. Automated/unattended runs only ever use --install.
+// are deliberately split. Unattended runs reboot only inside the maintenance window.
 //
 //   node scripts/apply-staged-update.mjs --install
 //     Installs the staged update into a new boot environment WITHOUT rebooting
 //     (update.run {reboot:false}). VMs keep running; the new version takes effect at the
 //     next reboot. Pre-flight: pools healthy, no reboot already pending.
 //
+//   node scripts/apply-staged-update.mjs --check-window
+//     Read-only. Exits 0 if now is inside the Production maintenance window, 3 if not.
+//     Run it BEFORE stopping any VM so an out-of-window run never takes Production down.
+//
 //   node scripts/apply-staged-update.mjs --reboot
-//     Maintenance window only, when Nic has asked for it. Requires every VM already
-//     stopped in order (Portal -> Plex -> HomeAssistant -> PostgreSQL -> ksi_webapp) and
-//     pools healthy, then calls system.reboot, waits for the box to return, and prints
-//     the post-flight report.
+//     Maintenance window only (Sundays 21:00-24:00 America/New_York; users are told to
+//     log off ahead of 21:00). Refuses outside the window, and refuses to START after
+//     the cutoff so the reboot finishes before the window closes. Requires every VM
+//     already stopped in order (Portal -> Plex -> HomeAssistant -> PostgreSQL ->
+//     ksi_webapp) and pools healthy, then calls system.reboot, waits for the box to
+//     return, and prints the post-flight report.
 //
 // With no mode flag the script refuses to do anything.
 //
@@ -41,6 +47,34 @@ const client = new TrueNasClient({
   apiKey: process.env.TRUENAS_API_KEY,
   skipTlsVerify: process.env.TRUENAS_SKIP_TLS_VERIFY === "1",
 });
+
+// Production (ksi_webapp) maintenance window: Sundays 21:00 to midnight, Eastern time.
+// A reboot must START by the cutoff so VM restarts and verification finish in-window.
+const WINDOW = { tz: "America/New_York", weekday: "Sun", startHour: 21, cutoff: "23:30" };
+
+function windowStatus(at = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: WINDOW.tz, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+      .formatToParts(at)
+      .map((p) => [p.type, p.value])
+  );
+  const hhmm = `${parts.hour}:${parts.minute}`;
+  const open = parts.weekday === WINDOW.weekday && Number(parts.hour) >= WINDOW.startHour && hhmm <= WINDOW.cutoff;
+  return { open, now: `${parts.weekday} ${hhmm} ${WINDOW.tz}` };
+}
+
+function requireWindow() {
+  const w = windowStatus();
+  const desc = `${WINDOW.weekday} ${WINDOW.startHour}:00-${WINDOW.cutoff} ${WINDOW.tz}`;
+  if (!w.open) throw new Error(`Outside the maintenance window (${desc}); now ${w.now} — not rebooting`);
+  log(`maintenance window open (${desc}); now ${w.now}`);
+}
+
+async function checkWindow() {
+  const w = windowStatus();
+  log(w.open ? `IN maintenance window — now ${w.now}` : `OUTSIDE maintenance window — now ${w.now}`);
+  process.exitCode = w.open ? 0 : 3;
+}
 
 async function rebootReasons() {
   const r = await client.call("system.reboot.info");
@@ -87,10 +121,11 @@ async function install() {
   log(after.length ? `reboot pending ✅: ${after.join("; ")}` : "⚠️ no pending reboot reported — check the install");
   const bes = await client.call("boot.environment.query", [[], {}]);
   log(`boot envs: ${bes.map((b) => `${b.id}${b.active ? "(active)" : ""}${b.activated ? "(next boot)" : ""}`).join(", ")}`);
-  log(`================ DONE — ${target} installed; NOT rebooted. Schedule the reboot with Nic. ================`);
+  log(`================ DONE — ${target} installed; NOT rebooted. Reboot in the Sunday maintenance window. ================`);
 }
 
 async function reboot() {
+  requireWindow();
   const info = await client.call("system.info");
   const pools = await healthyPools();
   const vms = await client.call("vm.query", [[], {}]);
@@ -104,6 +139,7 @@ async function reboot() {
   const pending = await rebootReasons();
   log(pending.length ? `pending reboot reasons: ${pending.join("; ")}` : "no pending reboot reasons reported (rebooting anyway, as requested)");
   const preVersion = info.version;
+  requireWindow(); // re-check: VM shutdown may have run the clock past the cutoff
 
   log("pre-reboot OK — all VMs stopped, pools healthy; calling system.reboot");
   try {
@@ -155,9 +191,9 @@ async function reboot() {
 }
 
 const mode = process.argv[2];
-const run = mode === "--install" ? install : mode === "--reboot" ? reboot : null;
+const run = { "--install": install, "--reboot": reboot, "--check-window": checkWindow }[mode] ?? null;
 if (!run) {
-  log("Refusing to run without a mode: pass --install (no reboot) or --reboot (maintenance window only).");
+  log("Refusing to run without a mode: pass --install (no reboot), --check-window, or --reboot (maintenance window only).");
   process.exit(2);
 }
 run().catch((e) => {
