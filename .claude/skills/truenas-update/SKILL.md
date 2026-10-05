@@ -53,10 +53,12 @@ truenas_list_apps                (apps: upgrade_available per app)
 - If nothing is pending and no reboot is pending: tell Nic the system is fully current
   and stop. No CM doc for "nothing happened."
 
-Installed apps on this box (as of 2026-09-23): `open-speed-test`, `tailscale`,
-`grafana`. Treat `truenas_list_apps` as the source of truth — if its list differs
-from this one, work from what it returns and mention the difference to Nic so this
-line can be updated.
+Installed apps on this box (as of 2026-10-05): `komodo`, `open-speed-test`,
+`tailscale`, `grafana`. This list is informational only — `truenas_list_apps` is the
+source of truth. **Update every app it returns, including new or unlisted ones**
+(Nic's standing instruction, 2026-10-05); never skip or hold an app because it isn't
+named here. If the list differs, still apply the updates, then mention the
+difference in the report so this line can be refreshed.
 
 VMs on this box (as of 2026-10-01): `homeassistant=1, plex=3, postgresql=11,
 portal=14, ksi_webapp=18` (Production). Same rule — if `truenas_list_vms` shows a VM
@@ -66,7 +68,8 @@ shutdown order is known.
 ## Step 2 — Apply app updates (do this before the OS update — lower risk, isolates failures)
 
 App upgrades restart only that app's containers, not the host or any VM, so they stay
-automatic. For each app with `upgrade_available: true`:
+automatic. For **every** app with `upgrade_available: true` (whether or not it's in
+the list above):
 
 ```
 truenas_manage_app app=<name> action=upgrade
@@ -189,7 +192,8 @@ for `system.info` to answer, then prints the post-flight report.
       together, so normally nothing to do. If any still need a manual start after a
       couple of minutes: **ksi_webapp first**, then PostgreSQL → HomeAssistant →
       Plex → Portal.
-- [ ] All apps `RUNNING` (currently `open-speed-test`, `tailscale`, `grafana`). A
+- [ ] All apps `RUNNING` (every app `truenas_list_apps` returns — currently `komodo`,
+      `open-speed-test`, `tailscale`, `grafana`). A
       `DEPLOYING` blip is normal — recheck with `truenas_get_app`.
 - [ ] 0 active alerts; no reboot still pending; `update.status` fully current.
 
