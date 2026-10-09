@@ -428,7 +428,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           output.probe_error = error instanceof Error ? error.message : String(error);
         }
       } else {
-        output.hint = "Set TRUENAS_URL and TRUENAS_API_KEY in the .env file next to package.json, then retry.";
+        output.hint =
+          "Set TRUENAS_URL and TRUENAS_API_KEY in this server's MCP registration env, then retry. Use the .env file " +
+          "next to package.json only for a single-NAS setup: it fills in every variable a registration leaves unset, " +
+          "so an additional NAS's key must never go there (see README: More than one NAS).";
       }
       // Route through respond() so this tool honors the same result contract as
       // the others (never emit text AND structuredContent together — some

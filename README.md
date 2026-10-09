@@ -246,6 +246,34 @@ claude mcp add --scope user --transport stdio truenas -- node /absolute/path/to/
 
 Check it connected with `claude mcp list` (or `/mcp` inside a session).
 
+#### More than one NAS (e.g. Rex, over Tailscale)
+
+Each NAS gets its own registration of the same `dist/index.js`. **The repo
+`.env` is loaded on every start and fills in any variable a registration
+doesn't set**, so an extra registration must pin all eight `TRUENAS_*`
+variables. Otherwise it inherits the `.env` NAS's URL or, worse, its API key
+and sends it to the other box. Register with an **empty** key placeholder, so
+the server refuses to connect until the real key is set:
+
+```bash
+claude mcp add --scope user truenas-rex \
+  -e TRUENAS_URL=https://100.79.169.53 -e TRUENAS_API_KEY= \
+  -e TRUENAS_SKIP_TLS_VERIFY=1 -e TRUENAS_ENABLE_WRITE=1 -e TRUENAS_ENABLE_DESTRUCTIVE=0 \
+  -e TRUENAS_ALLOW_HTTP=0 -e TRUENAS_USERNAME= -e TRUENAS_TEST_DATASET= \
+  -- /usr/local/bin/node /absolute/path/to/MCP-TrueNAS/dist/index.js
+```
+
+Then write the key into that registration's `env` (never into `.env`, which
+belongs to the first NAS and the update routine).
+
+**Rex (the camper) is reached only over Tailscale**, at its tailnet IP. Its LAN
+overlaps the home WiFi VLAN, so LAN addresses can't be used. **If this Mac isn't
+connected to the tailnet, every `truenas-rex` call fails.** Check
+`tailscale_status` first. The link is cellular, sometimes relayed through DERP,
+so expect about 70–150 ms per call and occasional outages. Both NASes report
+the hostname `truenas`, so check which server (`truenas` or `truenas-rex`)
+you're calling before making a change.
+
 ### 5. Use it
 
 Just ask Claude things like:

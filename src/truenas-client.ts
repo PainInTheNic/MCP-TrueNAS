@@ -149,7 +149,8 @@ export class TrueNasClient {
   constructor(private readonly cfg: TrueNasConfig) {
     if (!cfg.url) {
       throw new TrueNasError(
-        "TRUENAS_URL is not set. Add it to the .env file next to package.json, e.g. TRUENAS_URL=https://192.168.1.50"
+        "TRUENAS_URL is not set. Set it in this server's MCP registration env (or, for a single-NAS setup, " +
+          "the .env file next to package.json), e.g. TRUENAS_URL=https://192.168.1.50"
       );
     }
     // Parse instead of string-matching: URL schemes are case-insensitive
@@ -175,7 +176,8 @@ export class TrueNasClient {
     if (!cfg.apiKey) {
       throw new TrueNasError(
         "TRUENAS_API_KEY is not set. Create a key in the TrueNAS UI (user icon, top right -> My API Keys -> Add) " +
-          "and put it in the .env file."
+          "and set it in this server's MCP registration env. Use the .env file only for a single-NAS setup: it " +
+          "fills in every variable a registration leaves unset, so a second NAS's key must never go there."
       );
     }
     this.baseUrl = parsed.origin;
