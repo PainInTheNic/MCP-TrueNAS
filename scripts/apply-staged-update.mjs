@@ -38,7 +38,12 @@ import { TrueNasClient } from "../dist/truenas-client.js";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));
+// Which TrueNAS: ../.env is the box at View (default). TRUENAS_ENV_FILE=.env.rex selects the box at Rex.
+// TRUENAS_PRIMARY_VM names the VM that must come back first (ksi_webapp at View, PostgreSQL at Rex).
+const ENV_FILE = process.env.TRUENAS_ENV_FILE || ".env";
+if (!/^\.env(\.[a-z0-9-]+)?$/.test(ENV_FILE)) throw new Error(`TRUENAS_ENV_FILE must be .env or .env.<name>, got ${ENV_FILE}`);
+process.loadEnvFile(fileURLToPath(new URL(`../${ENV_FILE}`, import.meta.url)));
+const PRIMARY_VM = process.env.TRUENAS_PRIMARY_VM || "ksi_webapp";
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
@@ -46,6 +51,7 @@ const client = new TrueNasClient({
   url: process.env.TRUENAS_URL,
   apiKey: process.env.TRUENAS_API_KEY,
   skipTlsVerify: process.env.TRUENAS_SKIP_TLS_VERIFY === "1",
+  allowHttp: process.env.TRUENAS_ALLOW_HTTP === "1",
 });
 
 // Production (ksi_webapp) maintenance window: Sundays 21:00 to midnight, Eastern time.
@@ -171,8 +177,8 @@ async function reboot() {
   }
   const vmsAfter = await client.call("vm.query", [[], {}]);
   log(`VMs: ${vmsAfter.map((v) => `${v.name}=${v.status?.state}`).join(", ")}`);
-  const prod = vmsAfter.find((v) => v.name === "ksi_webapp");
-  log(prod?.status?.state === "RUNNING" ? "Production VM ksi_webapp RUNNING ✅" : "⚠️ Production VM ksi_webapp NOT RUNNING — start it FIRST");
+  const prod = vmsAfter.find((v) => v.name === PRIMARY_VM);
+  log(prod?.status?.state === "RUNNING" ? `Primary VM ${PRIMARY_VM} RUNNING ✅` : `⚠️ Primary VM ${PRIMARY_VM} NOT RUNNING — start it FIRST`);
   const apps = await client.call("app.query", [[], {}]);
   log(`apps: ${apps.map((a) => `${a.name}=${a.state}`).join(", ")}`);
   const appsNotRunning = apps.filter((a) => a.state !== "RUNNING");
@@ -187,7 +193,7 @@ async function reboot() {
   log(`update.status: new_version=${upd?.status?.new_version?.version ?? "null (up to date)"}`);
   const bes = await client.call("boot.environment.query", [[], {}]);
   log(`boot envs: ${bes.map((b) => `${b.id}${b.active ? "(active)" : ""}`).join(", ")}`);
-  log("================ DONE — if autostart missed any VM, start ksi_webapp first, then PostgreSQL -> HomeAssistant -> Plex -> Portal ================");
+  log(`================ DONE (${ENV_FILE}) — if autostart missed any VM, start ${PRIMARY_VM} first, then the rest in reverse shutdown order ================`);
 }
 
 const mode = process.argv[2];

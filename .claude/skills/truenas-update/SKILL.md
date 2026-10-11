@@ -1,6 +1,6 @@
 ---
 name: truenas-update
-description: Check for and apply TrueNAS SCALE OS + app updates, with ordered VM shutdown, verification, and change-management documentation. Use when the user asks to check for TrueNAS/app updates, apply an update, run the update cycle, or perform the scheduled maintenance reboot on the truenas box (192.168.0.253).
+description: Check for and apply TrueNAS SCALE OS + app updates, with ordered VM shutdown, verification, and change-management documentation. Use when the user asks to check for TrueNAS/app updates, apply an update, run the update cycle, or perform the scheduled maintenance reboot on the truenas box at View (192.168.0.253) or, with the argument `rex`, the TrueNAS at Rex (tailnet 100.79.169.53).
 user-invocable: true
 ---
 
@@ -41,6 +41,41 @@ Arguments passed: `$ARGUMENTS`
 - **"reboot" / "maintenance"** → Step 4 only (plus its CM doc and report). Still
   window-bound. If Nic asks outside the window, tell him the script refuses until
   Sunday 21:00 ET. Don't try to get around it.
+
+- **"rex" anywhere in the arguments** (e.g. `rex`, `rex check`) → the same steps against
+  the **TrueNAS at Rex** instead. Read "Targets" below first: it swaps the tools, the
+  script's settings file, the VM list and the shutdown order. Everything else
+  (window, CM docs, safety rules) is identical.
+
+## Targets
+
+| | View (default) | Rex (`rex` argument) |
+|---|---|---|
+| Box | `truenas`, 192.168.0.253, LAN | `truenas` (rex-truenas), tailnet 100.79.169.53, over Starlink/cellular |
+| MCP tools | `truenas_*` (server `truenas`) | the same tool names on server **`truenas-rex`** (`mcp__truenas-rex__truenas_*`) |
+| Script | `node scripts/apply-staged-update.mjs <mode>` | `TRUENAS_ENV_FILE=.env.rex node scripts/apply-staged-update.mjs <mode>` |
+| VMs | homeassistant=1, plex=3, postgresql=11, portal=14, ksi_webapp=18 | HomeAssistant=1, PostgreSQL=2 |
+| Shutdown order | Portal → Plex → HomeAssistant → PostgreSQL → ksi_webapp | **HomeAssistant → PostgreSQL** |
+| Comes back first | ksi_webapp (Production) | PostgreSQL (HA's recorder), then HomeAssistant |
+| Window | Sundays 21:00–24:00 ET, reboot must start by 23:30 | **the same window** (Nic, 2026-10-11: mirror View's patching) |
+
+**Rex specifics:**
+- **Tailscale first.** Rex is reachable only over the tailnet. Before Step 1 call
+  `tailscale_status`; if not connected, call `tailscale_connect` (no approval needed:
+  Nic's standing permission). Leave it connected afterwards. If a Rex call fails, check
+  `tailscale_status` and `tailscale_ping 100.79.169.53` before concluding the box is down.
+- **Never use the View tools or the default script for Rex,** and never the reverse.
+  `.env.rex` (mode 600, git-ignored) holds the Rex connection settings and
+  `TRUENAS_PRIMARY_VM=PostgreSQL`; don't print it.
+- **Slow links:** a reboot over Starlink/cellular can take several minutes to answer
+  again. If the script's wait gives up, poll `truenas_connection_status` on
+  `truenas-rex` every minute for up to 15 minutes before calling it a failure.
+- The Rex box boots from a USB stick: after a reboot, confirm `truenas_boot_status`
+  is healthy and say so in the report.
+- CM docs say **"TrueNAS at Rex"** in the title and Device Information.
+- Wherever the steps below say "ksi_webapp first" or list View's VMs, use the Rex
+  column above instead. Rex has no Production VM, so there is no user-facing downtime
+  to announce, but the window still applies.
 
 ---
 
