@@ -254,12 +254,19 @@ maintenance reboot are separate records (the reboot record references the instal
 record's CHG number). No skipping "minor" ones (see `feedback-document-every-change`
 memory — this was corrected once already, don't repeat it).
 
+**Follow the `change-management` skill** (in `~/.claude/skills`) for folder, numbering,
+naming and formatting hazards. It is the source of truth; the notes below are this
+skill's specifics. **Rex records go in the Rex folder** (`11pRN6VSPrqvz6vSTLaJd59V1_KWdMdJq`,
+Home Lab > Change Management > Rex > 2026) with titles `CHG-REX-YYYY.MM.DD-NNN …` and
+their own daily sequence. View records stay in the folder below. Never file a Rex change
+in the View folder or the reverse.
+
 Use the Google Drive MCP `create_file` tool. **Exact parameter names** (a past
 attempt failed twice by guessing `name`/`content` instead of the real schema):
 
 ```
 title:            "<CHG-YYYY.MM.DD-NNN description>"   (also embed the same as an H1 inside textContent)
-parentId:         1YcAyiuJxiTKkr_uLY6sfTn0WuOPY52o5     (2026 CM folder — if the
+parentId:         1YcAyiuJxiTKkr_uLY6sfTn0WuOPY52o5     (View 2026 CM folder; Rex: 11pRN6VSPrqvz6vSTLaJd59V1_KWdMdJq — if the
                    calendar year has rolled over, find/confirm the current year's
                    folder under the CM root before using this id blindly)
 contentMimeType:  text/markdown
